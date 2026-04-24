@@ -30,7 +30,7 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     characters = service.list_characters("novel-1")
     assert characters["items"][0]["name"] == "林澈"
 
-    context = await service.before_context_build({"novel_id": "novel-1", "chapter_number": 2})
+    context = service.before_context_build({"novel_id": "novel-1", "chapter_number": 2})
     assert context["ok"] is True
     content = context["context_blocks"][0]["content"]
     assert "动态角色状态" in content
@@ -183,7 +183,7 @@ async def test_context_patch_omits_future_chapter_facts(tmp_path):
         }
     )
 
-    context = await service.before_context_build({"novel_id": "novel-6", "chapter_number": 2})
+    context = service.before_context_build({"novel_id": "novel-6", "chapter_number": 2})
 
     assert context["ok"] is True
     patch = context["context_patch"]

@@ -114,7 +114,7 @@ class EvolutionWorldAssistantService:
         )
         return {"ok": True, "data": {"facts": snapshot.to_dict(), "characters_updated": updated_cards, "extraction": extraction.to_dict()}}
 
-    async def before_context_build(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def before_context_build(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
         chapter_number = _int_or_none(payload.get("chapter_number"))
         if not novel_id:
