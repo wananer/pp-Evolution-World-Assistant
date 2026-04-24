@@ -1,79 +1,146 @@
+:root {
+  --ewa-bg: rgba(12, 18, 32, 0.94);
+  --ewa-bg-soft: rgba(30, 41, 70, 0.72);
+  --ewa-border: rgba(167, 139, 250, 0.25);
+  --ewa-text: #f8fafc;
+  --ewa-muted: #aab6ca;
+  --ewa-accent: #a78bfa;
+  --ewa-accent-2: #22d3ee;
+  --ewa-glow: rgba(124, 58, 237, 0.34);
+}
+
 #ewa-panel-button {
   position: fixed;
   right: 18px;
   bottom: 86px;
   z-index: 9999;
-  width: 46px;
-  height: 46px;
-  border: 0;
+  width: 54px;
+  height: 54px;
+  border: 1px solid rgba(196, 181, 253, 0.55);
   border-radius: 999px;
-  background: linear-gradient(135deg, #6366f1, #a855f7);
+  background:
+    radial-gradient(circle at 30% 20%, rgba(255,255,255,0.35), transparent 24px),
+    linear-gradient(135deg, rgba(79, 70, 229, 0.95), rgba(168, 85, 247, 0.92));
   color: #fff;
-  font-weight: 800;
-  box-shadow: 0 12px 28px rgba(79, 70, 229, 0.35);
+  box-shadow: 0 14px 34px rgba(79, 70, 229, 0.38), inset 0 1px 1px rgba(255,255,255,0.25);
   cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: transform 0.22s ease, box-shadow 0.22s ease;
 }
 
 #ewa-panel-button:hover {
-  transform: translateY(-1px);
+  transform: translateY(-2px) scale(1.03);
+  box-shadow: 0 18px 46px rgba(124, 58, 237, 0.48), 0 0 0 6px rgba(167, 139, 250, 0.12);
+}
+
+.ewa-fab-mark {
+  position: absolute;
+  top: 7px;
+  left: 11px;
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+.ewa-fab-text {
+  font-weight: 900;
+  letter-spacing: 0.03em;
 }
 
 #ewa-drawer {
   position: fixed;
-  top: 72px;
+  top: 58px;
   right: 18px;
   z-index: 9998;
-  width: min(380px, calc(100vw - 36px));
-  max-height: calc(100vh - 120px);
+  width: min(470px, calc(100vw - 36px));
+  max-height: calc(100vh - 94px);
   display: none;
   overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.25);
-  border-radius: 18px;
-  background: rgba(15, 23, 42, 0.94);
-  color: #f8fafc;
-  box-shadow: 0 22px 70px rgba(2, 6, 23, 0.38);
-  backdrop-filter: blur(16px);
+  border: 1px solid var(--ewa-border);
+  border-radius: 24px;
+  background: var(--ewa-bg);
+  color: var(--ewa-text);
+  box-shadow: 0 28px 90px rgba(2, 6, 23, 0.46), 0 0 0 1px rgba(255,255,255,0.04) inset;
+  backdrop-filter: blur(22px) saturate(150%);
 }
 
-#ewa-drawer.open {
-  display: block;
-}
+#ewa-drawer.open { display: block; }
 
-#ewa-drawer header {
+.ewa-orb {
+  position: absolute;
+  pointer-events: none;
+  filter: blur(18px);
+  opacity: 0.55;
+}
+.ewa-orb-a { width: 160px; height: 160px; right: -54px; top: -60px; background: rgba(168,85,247,0.5); }
+.ewa-orb-b { width: 120px; height: 120px; left: -42px; bottom: 48px; background: rgba(34,211,238,0.35); }
+
+.ewa-header,
+.ewa-tabs,
+.ewa-content,
+.ewa-footer { position: relative; z-index: 1; }
+
+.ewa-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  padding: 14px 16px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  align-items: flex-start;
+  padding: 18px 18px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
 }
 
-#ewa-drawer header button {
-  border: 0;
-  background: transparent;
-  color: #cbd5e1;
-  font-size: 22px;
-  cursor: pointer;
-}
+.ewa-header strong { display: block; font-size: 20px; letter-spacing: -0.02em; }
+.ewa-header p { margin: 5px 0 0; color: var(--ewa-muted); font-size: 13px; }
+.ewa-kicker { color: var(--ewa-accent-2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; font-weight: 800; }
+.ewa-close { border: 0; background: rgba(255,255,255,0.08); color: #dbeafe; width: 32px; height: 32px; border-radius: 999px; font-size: 22px; cursor: pointer; }
 
-#ewa-drawer main {
-  max-height: calc(100vh - 180px);
-  overflow: auto;
-  padding: 14px;
-}
+.ewa-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px 14px 6px; }
+.ewa-tabs button { border: 1px solid rgba(148,163,184,0.18); border-radius: 999px; background: rgba(15,23,42,0.5); color: var(--ewa-muted); padding: 8px 10px; font-weight: 800; cursor: pointer; }
+.ewa-tabs button.active { color: #fff; border-color: rgba(167,139,250,0.55); background: linear-gradient(135deg, rgba(99,102,241,0.48), rgba(168,85,247,0.38)); box-shadow: 0 8px 22px rgba(124,58,237,0.22); }
 
-.ewa-card {
-  margin-bottom: 10px;
-  padding: 12px;
-  border-radius: 14px;
-  background: rgba(30, 41, 59, 0.86);
-}
+.ewa-content { max-height: calc(100vh - 245px); overflow: auto; padding: 14px; }
+.ewa-summary-grid { display: grid; grid-template-columns: 0.8fr 0.9fr 1.5fr; gap: 10px; margin-bottom: 14px; }
+.ewa-summary-grid article { padding: 12px; border-radius: 16px; background: rgba(15,23,42,0.58); border: 1px solid rgba(148,163,184,0.14); }
+.ewa-summary-grid b { display: block; font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ewa-summary-grid span { color: var(--ewa-muted); font-size: 12px; }
 
-.ewa-card h4 {
-  margin: 0 0 6px;
-}
+.ewa-section { padding: 14px; border-radius: 20px; background: rgba(15,23,42,0.48); border: 1px solid rgba(148,163,184,0.14); }
+.ewa-section-head { display: flex; justify-content: space-between; gap: 12px; align-items: end; margin-bottom: 12px; }
+.ewa-section-head h3 { margin: 0; font-size: 15px; letter-spacing: 0.04em; }
+.ewa-section-head p { margin: 0; color: var(--ewa-muted); font-size: 12px; text-align: right; }
 
-.ewa-card p,
-.ewa-card small {
-  margin: 0;
-  color: #cbd5e1;
+.ewa-role-list { display: grid; gap: 10px; }
+.ewa-role-card { display: grid; grid-template-columns: 42px 1fr; gap: 12px; padding: 12px; border-radius: 18px; background: linear-gradient(135deg, rgba(30,41,59,0.88), rgba(30,27,75,0.46)); border: 1px solid rgba(148,163,184,0.13); }
+.ewa-role-avatar { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 14px; background: linear-gradient(135deg, rgba(34,211,238,0.32), rgba(167,139,250,0.45)); color: #fff; font-weight: 900; }
+.ewa-role-topline { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.ewa-role-topline h4 { margin: 0; font-size: 15px; }
+.ewa-role-topline span { font-size: 11px; color: #c4b5fd; border: 1px solid rgba(196,181,253,0.25); border-radius: 999px; padding: 2px 7px; }
+.ewa-role-meta { margin: 4px 0 8px; color: var(--ewa-muted); font-size: 12px; }
+.ewa-role-event { margin: 0; color: #e2e8f0; line-height: 1.55; font-size: 13px; }
+.ewa-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.ewa-chip-row em { font-style: normal; font-size: 11px; color: #bae6fd; border: 1px solid rgba(34,211,238,0.22); background: rgba(8,145,178,0.13); border-radius: 999px; padding: 3px 8px; }
+
+.ewa-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.ewa-timeline li { border-left: 2px solid rgba(167,139,250,0.55); padding: 0 0 0 12px; }
+.ewa-timeline span { color: var(--ewa-accent-2); font-size: 12px; font-weight: 800; }
+.ewa-timeline strong { display: block; margin: 2px 0 4px; }
+.ewa-timeline p { margin: 0; color: #e2e8f0; line-height: 1.55; }
+
+.ewa-status-list { display: grid; gap: 8px; margin: 0; }
+.ewa-status-list div { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 12px; background: rgba(30,41,59,0.72); }
+.ewa-status-list dt { color: var(--ewa-muted); }
+.ewa-status-list dd { margin: 0; color: #fff; font-weight: 700; text-align: right; }
+.ewa-capabilities { margin-top: 14px; }
+
+.ewa-loading,
+.ewa-empty { padding: 42px 18px; text-align: center; color: var(--ewa-muted); }
+.ewa-loading span { display: inline-block; width: 9px; height: 9px; margin-right: 8px; border-radius: 999px; background: var(--ewa-accent-2); box-shadow: 0 0 16px var(--ewa-accent-2); }
+.ewa-empty b { display: block; color: #fff; margin-bottom: 6px; }
+.ewa-empty p { margin: 0; }
+
+.ewa-footer { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px 14px; border-top: 1px solid rgba(148,163,184,0.16); color: var(--ewa-muted); font-size: 12px; }
+.ewa-footer button { border: 1px solid rgba(167,139,250,0.32); color: #ede9fe; background: rgba(124,58,237,0.22); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-weight: 800; }
+
+@media (max-width: 640px) {
+  #ewa-drawer { top: 12px; right: 12px; left: 12px; width: auto; }
+  .ewa-summary-grid { grid-template-columns: 1fr; }
 }
