@@ -15,18 +15,30 @@ async def get_status():
         "plugin_name": "evolution_world_assistant",
         "version": "0.1.0",
         "status": "installed",
-        "phase": "plotpilot-adapter-skeleton",
+        "phase": "dynamic-rolecard-phase-1",
+        "capabilities": ["after_commit", "before_context_build", "character_cards", "manual_rebuild"],
     }
 
 
 @router.get("/novels/{novel_id}/characters")
 async def list_characters(novel_id: str):
-    state = _service.storage.read_json(
-        "evolution_world_assistant",
-        ["novels", novel_id, "characters.json"],
-        default={"items": []},
-    )
-    return state
+    return _service.list_characters(novel_id)
+
+
+@router.get("/novels/{novel_id}/characters/{character_id}")
+async def get_character(novel_id: str, character_id: str):
+    card = _service.get_character(novel_id, character_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="character not found")
+    return card
+
+
+@router.get("/novels/{novel_id}/characters/{character_id}/timeline")
+async def get_character_timeline(novel_id: str, character_id: str):
+    timeline = _service.list_character_timeline(novel_id, character_id)
+    if not timeline["items"] and not timeline.get("character"):
+        raise HTTPException(status_code=404, detail="character not found")
+    return timeline
 
 
 @router.post("/novels/{novel_id}/chapters/{chapter_number}/rerun")
@@ -34,7 +46,7 @@ async def rerun_chapter(novel_id: str, chapter_number: int, payload: dict | None
     body = payload or {}
     content = str(body.get("content") or "").strip()
     if not content:
-        raise HTTPException(status_code=400, detail="content is required for skeleton rerun")
+        raise HTTPException(status_code=400, detail="content is required for rerun")
     return await _service.after_commit(
         {
             "novel_id": novel_id,
@@ -46,5 +58,5 @@ async def rerun_chapter(novel_id: str, chapter_number: int, payload: dict | None
 
 
 @router.post("/novels/{novel_id}/rebuild")
-async def rebuild_novel(novel_id: str):
-    return await _service.manual_rebuild({"novel_id": novel_id, "trigger_type": "manual"})
+async def rebuild_novel(novel_id: str, payload: dict | None = None):
+    return await _service.manual_rebuild({"novel_id": novel_id, "trigger_type": "manual", **(payload or {})})

@@ -17,3 +17,63 @@
 #ewa-panel-button:hover {
   transform: translateY(-1px);
 }
+
+#ewa-drawer {
+  position: fixed;
+  top: 72px;
+  right: 18px;
+  z-index: 9998;
+  width: min(380px, calc(100vw - 36px));
+  max-height: calc(100vh - 120px);
+  display: none;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.94);
+  color: #f8fafc;
+  box-shadow: 0 22px 70px rgba(2, 6, 23, 0.38);
+  backdrop-filter: blur(16px);
+}
+
+#ewa-drawer.open {
+  display: block;
+}
+
+#ewa-drawer header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+#ewa-drawer header button {
+  border: 0;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 22px;
+  cursor: pointer;
+}
+
+#ewa-drawer main {
+  max-height: calc(100vh - 180px);
+  overflow: auto;
+  padding: 14px;
+}
+
+.ewa-card {
+  margin-bottom: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(30, 41, 59, 0.86);
+}
+
+.ewa-card h4 {
+  margin: 0 0 6px;
+}
+
+.ewa-card p,
+.ewa-card small {
+  margin: 0;
+  color: #cbd5e1;
+}
