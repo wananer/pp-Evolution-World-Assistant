@@ -12,11 +12,14 @@ def build_context_patch(
     characters: list[dict[str, Any]],
     facts: list[dict[str, Any]],
     *,
+    outline: str = "",
     max_characters: int = 8,
     max_facts: int = 5,
 ) -> dict[str, Any]:
-    selected_characters = _select_characters(characters, max_characters)
     recent_facts = facts[-max_facts:]
+    selection = _select_characters(characters, max_characters, outline=outline, recent_facts=recent_facts)
+    selected_characters = selection["selected"]
+    background_characters = selection["background"]
     blocks = []
 
     if selected_characters:
@@ -45,7 +48,7 @@ def build_context_patch(
             }
         )
 
-    risks = _build_risks(selected_characters, recent_facts)
+    risks = _build_risks(selected_characters, recent_facts, background_characters)
     if risks:
         blocks.append(
             {
@@ -81,11 +84,59 @@ def render_patch_summary(patch: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _select_characters(characters: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    def sort_key(card: dict[str, Any]):
-        return (-(int(card.get("last_seen_chapter") or 0)), int(card.get("first_seen_chapter") or 0), str(card.get("name") or ""))
+def _select_characters(
+    characters: list[dict[str, Any]],
+    limit: int,
+    *,
+    outline: str = "",
+    recent_facts: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, list[dict[str, Any]]]:
+    scored = []
+    outline_text = str(outline or "")
+    latest_chapter = max([int(fact.get("chapter_number") or 0) for fact in (recent_facts or [])] or [0])
+    fact_text = "\n".join(str(fact.get("summary") or "") for fact in (recent_facts or []))
 
-    return sorted(characters, key=sort_key)[:limit]
+    for card in characters:
+        name = str(card.get("name") or "")
+        aliases = [str(alias) for alias in (card.get("aliases") or []) if alias]
+        terms = [name, *aliases]
+        last_seen = int(card.get("last_seen_chapter") or 0)
+        score = 0
+        reasons: list[str] = []
+        if any(term and term in outline_text for term in terms):
+            score += 100
+            reasons.append("本章大纲明确提及")
+        latest_event = (card.get("recent_events") or [])[-1] if card.get("recent_events") else {}
+        latest_summary = str(latest_event.get("summary") or "")
+        locations = " ".join(str(item) for item in latest_event.get("locations") or [])
+        if outline_text and latest_summary and any(token and token in outline_text for token in _extract_context_terms(latest_summary + " " + locations)):
+            score += 35
+            reasons.append("与本章地点/物件相关")
+        if latest_chapter and last_seen == latest_chapter:
+            score += 12
+            reasons.append("上一有效事实中刚出现")
+        elif latest_chapter and last_seen >= latest_chapter - 1:
+            score += 6
+        if name and name in fact_text:
+            score += 4
+        enriched = {**card, "injection_relevance": {"score": score, "reasons": reasons or ["近期背景"]}}
+        scored.append((score, -last_seen, str(card.get("first_seen_chapter") or ""), name, enriched))
+
+    scored.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
+    has_outline = bool(outline_text.strip())
+    if has_outline:
+        selected = [item[-1] for item in scored if item[0] >= 35][:limit]
+        background = [item[-1] for item in scored if item[-1] not in selected and item[0] > 0]
+        return {"selected": selected, "background": background[:4]}
+    return {"selected": [item[-1] for item in scored[:limit]], "background": []}
+
+
+def _extract_context_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    for marker in ["黑塔", "雾城", "星港", "城门", "钥匙", "罗盘", "白鸦", "旧案", "密门"]:
+        if marker in text:
+            terms.append(marker)
+    return terms
 
 
 def _render_characters(characters: list[dict[str, Any]]) -> str:
@@ -108,13 +159,16 @@ def _render_facts(facts: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _build_risks(characters: list[dict[str, Any]], facts: list[dict[str, Any]]) -> list[str]:
+def _build_risks(characters: list[dict[str, Any]], facts: list[dict[str, Any]], background_characters: Optional[list[dict[str, Any]]] = None) -> list[str]:
     risks: list[str] = []
     if characters:
         stale = [card for card in characters if int(card.get("last_seen_chapter") or 0) < int((facts[-1] or {}).get("chapter_number") or 0) - 5] if facts else []
         if stale:
             names = "、".join(str(card.get("name")) for card in stale[:4])
             risks.append(f"这些角色较久未更新，重新登场前建议交代状态：{names}")
+    if background_characters:
+        names = "、".join(str(card.get("name")) for card in background_characters[:4])
+        risks.append(f"以下近期角色未被本章大纲明确召回，除非剧情需要，不要强行安排出场：{names}")
     if facts:
         latest = facts[-1]
         if not latest.get("locations"):

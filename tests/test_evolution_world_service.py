@@ -223,3 +223,36 @@ def test_import_st_preset_converts_prompt_order_and_marks_unsupported(tmp_path):
     assert "controller_model_ejs_execution" in data["flows"][0]["unsupported"]
     saved = service.list_imported_flows("novel-7")
     assert saved["flows"][0]["name"] == "ST Flow"
+
+
+
+@pytest.mark.asyncio
+async def test_context_patch_filters_unmentioned_recent_characters_into_risks(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.manual_rebuild(
+        {
+            "novel_id": "novel-8",
+            "chapters": [
+                {"number": 1, "content": "《林澈》在雾城得到黑色钥匙。"},
+                {"number": 2, "content": "《沈月》在星港追踪白鸦，发现银色罗盘。"},
+                {"number": 3, "content": "《顾衡》留在城门，调查旧案卷宗。"},
+            ],
+        }
+    )
+
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-8",
+            "chapter_number": 4,
+            "payload": {"outline": "林澈独自进入黑塔，用黑色钥匙打开密门。"},
+        }
+    )
+
+    dynamic = next(block for block in context["context_patch"]["blocks"] if block["id"] == "dynamic_characters")
+    assert [item["name"] for item in dynamic["items"]] == ["林澈"]
+    risks = next(block for block in context["context_patch"]["blocks"] if block["id"] == "continuity_risks")
+    assert "沈月" in risks["content"]
+    assert "顾衡" in risks["content"]
+    assert "不要强行安排出场" in risks["content"]

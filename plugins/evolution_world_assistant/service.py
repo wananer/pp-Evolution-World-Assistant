@@ -120,7 +120,8 @@ class EvolutionWorldAssistantService:
         if not novel_id:
             return {"ok": True, "skipped": True, "reason": "missing novel_id"}
 
-        patch = self.build_context_patch(novel_id, chapter_number)
+        outline = str((payload.get("payload") or {}).get("outline") or payload.get("outline") or "")
+        patch = self.build_context_patch(novel_id, chapter_number, outline=outline)
         summary = render_patch_summary(patch)
         if not summary:
             return {"ok": True, "skipped": True, "reason": "no evolution state yet"}
@@ -253,13 +254,13 @@ class EvolutionWorldAssistantService:
             return {"items": []}
         return {"character": card, "items": card.get("recent_events", [])}
 
-    def build_context_patch(self, novel_id: str, chapter_number: Optional[int]) -> dict[str, Any]:
+    def build_context_patch(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> dict[str, Any]:
         facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
         characters = self.repository.list_character_cards(novel_id).get("items", [])
-        return build_context_patch(novel_id, chapter_number, characters, facts)
+        return build_context_patch(novel_id, chapter_number, characters, facts, outline=outline)
 
-    def build_context_summary(self, novel_id: str, chapter_number: Optional[int]) -> str:
-        return render_patch_summary(self.build_context_patch(novel_id, chapter_number))
+    def build_context_summary(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> str:
+        return render_patch_summary(self.build_context_patch(novel_id, chapter_number, outline=outline))
 
 
 def _extract_content(payload: dict[str, Any]) -> str:
