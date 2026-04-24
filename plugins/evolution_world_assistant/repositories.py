@@ -143,6 +143,13 @@ class EvolutionWorldRepository:
                 items.append(item)
         return items
 
+
+    def save_imported_flows(self, novel_id: str, converted: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "imported_flows.json"], converted)
+
+    def list_imported_flows(self, novel_id: str) -> dict[str, Any]:
+        return self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "imported_flows.json"], default={"schema_version": 1, "flows": [], "unsupported": []})
+
     def append_workflow_run(self, novel_id: str, run: dict[str, Any]) -> None:
         self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "runs.jsonl"], run)
 

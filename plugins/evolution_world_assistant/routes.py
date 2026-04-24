@@ -18,7 +18,7 @@ async def get_status():
         "version": "0.1.0",
         "status": "installed",
         "phase": "structured-extraction-phase-2",
-        "capabilities": ["after_commit", "before_context_build", "character_cards", "manual_rebuild", "structured_extraction", "deterministic_fallback", "rollback"],
+        "capabilities": ["after_commit", "before_context_build", "character_cards", "manual_rebuild", "structured_extraction", "deterministic_fallback", "rollback", "st_preset_import"],
     }
 
 
@@ -41,6 +41,16 @@ async def get_character_timeline(novel_id: str, character_id: str):
     if not timeline["items"] and not timeline.get("character"):
         raise HTTPException(status_code=404, detail="character not found")
     return timeline
+
+
+@router.get("/novels/{novel_id}/imported-flows")
+async def list_imported_flows(novel_id: str):
+    return _service.list_imported_flows(novel_id)
+
+
+@router.post("/novels/{novel_id}/import/st-preset")
+async def import_st_preset(novel_id: str, payload: dict):
+    return _service.import_st_preset(novel_id, payload or {})
 
 
 @router.get("/novels/{novel_id}/runs")

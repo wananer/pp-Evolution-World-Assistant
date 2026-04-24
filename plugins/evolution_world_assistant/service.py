@@ -10,6 +10,7 @@ from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
 from .context_patch import build_context_patch, render_patch_summary
+from .preset_converter import convert_st_preset
 from .repositories import EvolutionWorldRepository
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
@@ -209,6 +210,27 @@ class EvolutionWorldAssistantService:
             },
         )
         return {"ok": True, "data": {"novel_id": novel_id, "chapter_number": chapter_number, "removed_snapshot": removed, "characters_rebuilt": len(cards)}}
+
+    def import_st_preset(self, novel_id: str, preset: dict[str, Any]) -> dict[str, Any]:
+        converted = convert_st_preset(preset)
+        self.repository.save_imported_flows(novel_id, converted)
+        self.repository.append_workflow_run(
+            novel_id,
+            {
+                "run_id": f"import-flows-{_hash_text(_now())}",
+                "hook_name": "import_st_preset",
+                "trigger_type": "manual",
+                "status": "succeeded",
+                "started_at": _now(),
+                "finished_at": _now(),
+                "input": {"source": converted.get("source")},
+                "output": {"flows_imported": len(converted.get("flows") or []), "unsupported": converted.get("unsupported") or []},
+            },
+        )
+        return {"ok": True, "data": converted}
+
+    def list_imported_flows(self, novel_id: str) -> dict[str, Any]:
+        return self.repository.list_imported_flows(novel_id)
 
     def list_runs(self, novel_id: str, limit: int = 50) -> dict[str, Any]:
         return {"items": self.repository.list_workflow_runs(novel_id, limit=limit)}

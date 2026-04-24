@@ -190,3 +190,36 @@ async def test_context_patch_omits_future_chapter_facts(tmp_path):
     recent_facts = next(block for block in patch["blocks"] if block["id"] == "recent_facts")
     assert [item["chapter_number"] for item in recent_facts["items"]] == [1]
     assert "第2章" not in recent_facts["content"]
+
+
+def test_import_st_preset_converts_prompt_order_and_marks_unsupported(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    result = service.import_st_preset(
+        "novel-7",
+        {
+            "name": "ST Flow",
+            "temperature": 0.8,
+            "top_p": 0.9,
+            "prompts": [
+                {"identifier": "main", "name": "Main", "role": "system", "content": "提取角色与世界状态。"},
+                {"identifier": "world", "name": "World", "role": "system", "content": "世界与地点：{{char}}"},
+            ],
+            "prompt_order": [{"order": [{"identifier": "world", "enabled": True}, {"identifier": "main", "enabled": False}]}],
+            "controller_model": {"activate_entries": []},
+            "extensions": {"SPreset": {"RegexBinding": {"regexes": [{"id": "r1", "scriptName": "clean", "findRegex": "foo", "replaceString": "bar"}]}}},
+        },
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["source"] == "sillytavern_preset"
+    assert data["flows"][0]["name"] == "ST Flow"
+    assert data["flows"][0]["generation_options"]["temperature"] == 0.8
+    assert [entry["identifier"] for entry in data["flows"][0]["prompt_order"]] == ["world", "main"]
+    assert data["flows"][0]["prompt_order"][1]["enabled"] is False
+    assert data["flows"][0]["regex_rules"][0]["find_regex"] == "foo"
+    assert "controller_model_ejs_execution" in data["flows"][0]["unsupported"]
+    saved = service.list_imported_flows("novel-7")
+    assert saved["flows"][0]["name"] == "ST Flow"

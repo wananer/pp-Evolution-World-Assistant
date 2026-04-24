@@ -486,3 +486,73 @@
   cursor: wait;
   opacity: 0.72;
 }
+
+
+.ewa-preset-input {
+  width: 100%;
+  min-height: 118px;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 16px;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.62);
+  padding: 10px 12px;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  outline: none;
+}
+
+.ewa-preset-input:focus {
+  border-color: rgba(34, 211, 238, 0.46);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12);
+}
+
+.ewa-import-message {
+  align-self: center;
+  color: #bae6fd;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ewa-flow-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ewa-flow-card {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid rgba(167, 139, 250, 0.2);
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.72), rgba(49, 46, 129, 0.22));
+}
+
+.ewa-flow-card h4 {
+  margin: 0;
+  color: #fff;
+}
+
+.ewa-flow-warning,
+.ewa-warning-box p {
+  margin: 0;
+  color: #fde68a;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ewa-warning-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(251, 191, 36, 0.22);
+  border-radius: 14px;
+  background: rgba(120, 53, 15, 0.22);
+}
+
+.ewa-warning-box b {
+  display: block;
+  margin-bottom: 4px;
+  color: #fef3c7;
+  font-size: 12px;
+}

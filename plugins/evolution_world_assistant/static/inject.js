@@ -74,13 +74,14 @@
       return;
     }
     try {
-      const [characters, status, runs, snapshots] = await Promise.all([
+      const [characters, status, runs, snapshots, importedFlows] = await Promise.all([
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/characters`),
         runtime.fetchJson('/api/v1/plugins/evolution-world/status'),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/runs?limit=8`),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/snapshots`),
+        runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/imported-flows`),
       ]);
-      state.lastPayload = { novelId, characters, status, runs, snapshots };
+      state.lastPayload = { novelId, characters, status, runs, snapshots, importedFlows };
       renderPanel(drawer);
     } catch (error) {
       console.warn('[EvolutionWorld] panel request failed:', error);
@@ -264,6 +265,8 @@
     const capabilities = Array.isArray(status.capabilities) ? status.capabilities : [];
     const runs = Array.isArray(payload.runs?.items) ? payload.runs.items.slice().reverse() : [];
     const snapshots = Array.isArray(payload.snapshots?.items) ? payload.snapshots.items : [];
+    const importedFlows = Array.isArray(payload.importedFlows?.flows) ? payload.importedFlows.flows : [];
+    const unsupported = Array.isArray(payload.importedFlows?.unsupported) ? payload.importedFlows.unsupported : [];
     content.innerHTML = `
       <section class="ewa-section">
         <div class="ewa-section-head">
@@ -276,10 +279,26 @@
           <div><dt>版本</dt><dd>${escapeHtml(status.version || '-')}</dd></div>
           <div><dt>Novel</dt><dd>${escapeHtml(payload.novelId)}</dd></div>
           <div><dt>快照</dt><dd>${snapshots.length} 章</dd></div>
+          <div><dt>导入流</dt><dd>${importedFlows.length} 个</dd></div>
         </dl>
         <div class="ewa-chip-row ewa-capabilities">
           ${capabilities.map((item) => `<em>${escapeHtml(item)}</em>`).join('')}
         </div>
+      </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>ST 预设导入</h3>
+          <p>转换为 PlotPilot 声明式流程；EJS 与世界书写入只标记不执行</p>
+        </div>
+        <textarea class="ewa-preset-input" data-st-preset-input spellcheck="false" placeholder='粘贴 SillyTavern / Evolution preset JSON，例如 {"name":"Flow","prompts":[...]}'></textarea>
+        <div class="ewa-action-row">
+          <button type="button" class="ewa-mini-action" data-import-st-preset>转换并保存</button>
+          <span class="ewa-import-message" data-import-message></span>
+        </div>
+        <div class="ewa-flow-list">
+          ${importedFlows.map((flow) => renderImportedFlowCard(flow)).join('') || '<p class="ewa-empty-inline">暂无导入流程</p>'}
+        </div>
+        ${unsupported.length ? `<div class="ewa-warning-box"><b>全局不兼容项</b><p>${unsupported.map((item) => escapeHtml(item)).join('、')}</p></div>` : ''}
       </section>
       <section class="ewa-section ewa-run-section">
         <div class="ewa-section-head">
@@ -319,6 +338,22 @@
       </section>
     `;
     bindStatusInteractions(content, runs, snapshots);
+  }
+
+  function renderImportedFlowCard(flow) {
+    const unsupported = Array.isArray(flow.unsupported) ? flow.unsupported : [];
+    const prompts = Array.isArray(flow.prompt_order) ? flow.prompt_order : [];
+    const regexRules = Array.isArray(flow.regex_rules) ? flow.regex_rules : [];
+    return `
+      <article class="ewa-flow-card">
+        <div class="ewa-role-topline"><h4>${escapeHtml(flow.name || flow.id || 'Imported Flow')}</h4><span>${flow.enabled === false ? 'disabled' : 'enabled'}</span></div>
+        <p class="ewa-role-meta">${escapeHtml(flow.trigger || 'after_commit')} · prompts ${prompts.length} · regex ${regexRules.length}</p>
+        <div class="ewa-chip-row">
+          ${(prompts.slice(0, 5)).map((item) => `<em>${escapeHtml(item.name || item.identifier || 'prompt')}</em>`).join('')}
+        </div>
+        ${unsupported.length ? `<p class="ewa-flow-warning">不兼容：${unsupported.map((item) => escapeHtml(item)).join('、')}</p>` : ''}
+      </article>
+    `;
   }
 
   function bindStatusInteractions(root, runs, snapshots) {
@@ -372,7 +407,42 @@
         await refreshStatusTab();
       }
     });
+    root.querySelector('[data-import-st-preset]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      const input = root.querySelector('[data-st-preset-input]');
+      const message = root.querySelector('[data-import-message]');
+      if (!state.lastPayload?.novelId || !input) return;
+      let payload;
+      try {
+        payload = JSON.parse(input.value || '{}');
+      } catch (error) {
+        showTransientMessage(message, 'JSON 格式错误，未导入。');
+        return;
+      }
+      button.disabled = true;
+      button.textContent = '转换中...';
+      try {
+        const response = await fetch(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(state.lastPayload.novelId)}/import/st-preset`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!response.ok) throw new Error(`Import failed: ${response.status}`);
+        showTransientMessage(message, '已转换为声明式流程。');
+        input.value = '';
+      } catch (error) {
+        showTransientMessage(message, String(error));
+      } finally {
+        button.disabled = false;
+        button.textContent = '转换并保存';
+        await refreshStatusTab();
+      }
+    });
     bindRollbackButtons(root);
+  }
+
+  function showTransientMessage(element, text) {
+    if (!element) return;
+    element.textContent = text;
+    window.setTimeout(() => {
+      element.textContent = '';
+    }, 3000);
   }
 
   function bindRollbackButtons(root) {
