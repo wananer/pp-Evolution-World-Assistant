@@ -50,7 +50,7 @@
         <section class="ewa-card">
           <h4>${escapeHtml(item.name || item.character_id)}</h4>
           <p>首次：第${item.first_seen_chapter || '-'}章 / 最近：第${item.last_seen_chapter || '-'}章</p>
-          <small>${escapeHtml(((item.recent_events || []).at(-1) || {}).summary || '')}</small>
+          <small><b>最近动态：</b>${escapeHtml(((item.recent_events || []).at(-1) || {}).summary || '暂无独立动态')}</small>
         </section>
       `).join('');
     } catch (error) {

@@ -47,12 +47,13 @@ class EvolutionWorldRepository:
             ).to_dict()
             current["last_seen_chapter"] = max(int(current.get("last_seen_chapter") or 0), snapshot.chapter_number)
             current.setdefault("recent_events", [])
-            if snapshot.summary:
+            event_summary = _character_event_summary(name, snapshot)
+            if event_summary:
                 current["recent_events"].append(
                     {
                         "chapter_number": snapshot.chapter_number,
-                        "summary": snapshot.summary[:180],
-                        "locations": snapshot.locations,
+                        "summary": event_summary,
+                        "locations": snapshot.locations[:5],
                     }
                 )
                 current["recent_events"] = current["recent_events"][-8:]
@@ -89,3 +90,16 @@ def _int_or_none(value: Any) -> Optional[int]:
 
 def _slug(value: str) -> str:
     return "c_" + str(abs(hash(value)))
+
+
+def _character_event_summary(name: str, snapshot: ChapterFactSnapshot) -> str:
+    for event in snapshot.world_events:
+        if name in event:
+            return event[:180]
+    if snapshot.summary:
+        marker = snapshot.summary.find(name)
+        if marker >= 0:
+            start = max(0, marker - 24)
+            end = min(len(snapshot.summary), marker + 120)
+            return snapshot.summary[start:end]
+    return f"第{snapshot.chapter_number}章出现，地点：{'、'.join(snapshot.locations[:3]) or '未标注'}"
