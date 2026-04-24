@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from time import perf_counter
 from hashlib import sha256
 from typing import Any, Optional, Union, Tuple
 
@@ -32,6 +33,8 @@ class EvolutionWorldAssistantService:
         if not novel_id or not chapter_number or not content:
             return {"ok": True, "skipped": True, "reason": "missing novel_id/chapter_number/content"}
 
+        started_at = _now()
+        start_time = perf_counter()
         trigger_type = str(payload.get("trigger_type") or "auto")
         content_hash = str(payload.get("content_hash") or _hash_text(content))
         dedup_key = self.jobs.build_dedup_key(
@@ -47,11 +50,36 @@ class EvolutionWorldAssistantService:
         for name in known_names:
             if name and name in content and name not in snapshot.characters:
                 snapshot.characters.append(name)
+        previous_snapshot = self.repository.get_fact_snapshot(novel_id, chapter_number)
         self.repository.save_fact_snapshot(snapshot)
         updated_cards = self.repository.upsert_character_cards(novel_id, snapshot)
+        finished_at = _now()
+        duration_ms = int((perf_counter() - start_time) * 1000)
         self.repository.append_event(
             novel_id,
-            {"type": "chapter_committed", "chapter_number": chapter_number, "content_hash": content_hash, "at": _now()},
+            {"type": "chapter_committed", "chapter_number": chapter_number, "content_hash": content_hash, "at": finished_at},
+        )
+        self.repository.append_workflow_run(
+            novel_id,
+            {
+                "run_id": f"{chapter_number}-{content_hash}-{trigger_type}",
+                "hook_name": "after_commit",
+                "trigger_type": trigger_type,
+                "chapter_number": chapter_number,
+                "content_hash": content_hash,
+                "status": "succeeded",
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_ms": duration_ms,
+                "input": {"content_length": len(content)},
+                "output": {
+                    "characters": snapshot.characters,
+                    "locations": snapshot.locations,
+                    "world_events": snapshot.world_events,
+                    "characters_updated": [card.get("character_id") for card in updated_cards],
+                    "replaced_existing_snapshot": bool(previous_snapshot),
+                },
+            },
         )
         self.jobs.append(
             PluginJobRecord(
@@ -102,7 +130,21 @@ class EvolutionWorldAssistantService:
         if not novel_id:
             return {"ok": False, "error": "missing novel_id"}
         if not isinstance(chapters, list) or not chapters:
-            return {"ok": True, "skipped": True, "reason": "chapters payload is required for rebuild", "data": {"novel_id": novel_id}}
+            cards = self.repository.rebuild_character_cards_from_facts(novel_id)
+            self.repository.append_workflow_run(
+                novel_id,
+                {
+                    "run_id": f"rebuild-existing-{_hash_text(_now())}",
+                    "hook_name": "manual_rebuild",
+                    "trigger_type": "manual",
+                    "status": "succeeded",
+                    "started_at": _now(),
+                    "finished_at": _now(),
+                    "input": {"mode": "existing_facts"},
+                    "output": {"characters_rebuilt": len(cards)},
+                },
+            )
+            return {"ok": True, "data": {"novel_id": novel_id, "mode": "existing_facts", "characters_rebuilt": len(cards)}}
 
         rebuilt = []
         for chapter in chapters:
@@ -118,14 +160,49 @@ class EvolutionWorldAssistantService:
             )
             if result.get("ok") and not result.get("skipped"):
                 rebuilt.append(result["data"]["facts"]["chapter_number"])
-        return {"ok": True, "data": {"novel_id": novel_id, "rebuilt_chapters": rebuilt}}
+        cards = self.repository.rebuild_character_cards_from_facts(novel_id)
+        return {"ok": True, "data": {"novel_id": novel_id, "rebuilt_chapters": rebuilt, "characters_rebuilt": len(cards)}}
 
     async def rollback(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
         chapter_number = _int_or_none(payload.get("chapter_number"))
         if not novel_id or not chapter_number:
             return {"ok": False, "error": "missing novel_id/chapter_number"}
-        return {"ok": True, "skipped": True, "reason": "rollback deletion is reserved for Phase 2", "data": {"novel_id": novel_id, "chapter_number": chapter_number}}
+
+        removed = self.repository.delete_fact_snapshot(novel_id, chapter_number)
+        cards = self.repository.rebuild_character_cards_from_facts(novel_id)
+        event = {
+            "type": "chapter_rollback",
+            "chapter_number": chapter_number,
+            "removed_snapshot": removed,
+            "characters_rebuilt": len(cards),
+            "at": _now(),
+        }
+        self.repository.append_event(novel_id, event)
+        self.repository.append_workflow_run(
+            novel_id,
+            {
+                "run_id": f"rollback-{chapter_number}-{_hash_text(_now())}",
+                "hook_name": "rollback",
+                "trigger_type": str(payload.get("trigger_type") or "manual"),
+                "chapter_number": chapter_number,
+                "status": "succeeded",
+                "started_at": event["at"],
+                "finished_at": _now(),
+                "input": {"chapter_number": chapter_number},
+                "output": {"removed_snapshot": removed, "characters_rebuilt": len(cards)},
+            },
+        )
+        return {"ok": True, "data": {"novel_id": novel_id, "chapter_number": chapter_number, "removed_snapshot": removed, "characters_rebuilt": len(cards)}}
+
+    def list_runs(self, novel_id: str, limit: int = 50) -> dict[str, Any]:
+        return {"items": self.repository.list_workflow_runs(novel_id, limit=limit)}
+
+    def list_events(self, novel_id: str) -> dict[str, Any]:
+        return {"items": self.repository.list_events(novel_id)}
+
+    def list_snapshots(self, novel_id: str) -> dict[str, Any]:
+        return {"items": self.repository.list_fact_snapshots(novel_id)}
 
     def list_characters(self, novel_id: str) -> dict[str, Any]:
         return self.repository.list_character_cards(novel_id)

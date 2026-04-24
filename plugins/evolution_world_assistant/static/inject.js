@@ -74,11 +74,13 @@
       return;
     }
     try {
-      const [characters, status] = await Promise.all([
+      const [characters, status, runs, snapshots] = await Promise.all([
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/characters`),
         runtime.fetchJson('/api/v1/plugins/evolution-world/status'),
+        runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/runs?limit=8`),
+        runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/snapshots`),
       ]);
-      state.lastPayload = { novelId, characters, status };
+      state.lastPayload = { novelId, characters, status, runs, snapshots };
       renderPanel(drawer);
     } catch (error) {
       console.warn('[EvolutionWorld] panel request failed:', error);
@@ -260,6 +262,8 @@
     const content = drawer.querySelector('[data-content]');
     const status = payload.status || {};
     const capabilities = Array.isArray(status.capabilities) ? status.capabilities : [];
+    const runs = Array.isArray(payload.runs?.items) ? payload.runs.items.slice().reverse() : [];
+    const snapshots = Array.isArray(payload.snapshots?.items) ? payload.snapshots.items : [];
     content.innerHTML = `
       <section class="ewa-section">
         <div class="ewa-section-head">
@@ -271,12 +275,61 @@
           <div><dt>阶段</dt><dd>${escapeHtml(status.phase || '-')}</dd></div>
           <div><dt>版本</dt><dd>${escapeHtml(status.version || '-')}</dd></div>
           <div><dt>Novel</dt><dd>${escapeHtml(payload.novelId)}</dd></div>
+          <div><dt>快照</dt><dd>${snapshots.length} 章</dd></div>
         </dl>
         <div class="ewa-chip-row ewa-capabilities">
           ${capabilities.map((item) => `<em>${escapeHtml(item)}</em>`).join('')}
         </div>
       </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>运行记录</h3>
+          <p>最近 ${runs.length} 次</p>
+        </div>
+        <ol class="ewa-run-list">
+          ${runs.map((run) => `
+            <li>
+              <strong>${escapeHtml(run.hook_name || '-')}</strong>
+              <span>${escapeHtml(run.status || '-')} · 第${escapeHtml(run.chapter_number || '-')}章 · ${escapeHtml(run.trigger_type || '-')}</span>
+            </li>
+          `).join('') || '<li><span>暂无运行记录</span></li>'}
+        </ol>
+      </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>章节快照</h3>
+          <p>可回滚后重建人物卡</p>
+        </div>
+        <div class="ewa-snapshot-grid">
+          ${snapshots.map((snapshot) => `
+            <button type="button" class="ewa-snapshot-card" data-rollback-chapter="${escapeAttr(snapshot.chapter_number)}">
+              <b>第${escapeHtml(snapshot.chapter_number)}章</b>
+              <span>${escapeHtml((snapshot.characters || []).join('、') || '无角色')}</span>
+            </button>
+          `).join('') || '<p class="ewa-empty-inline">暂无快照</p>'}
+        </div>
+      </section>
     `;
+    bindStatusInteractions(content);
+  }
+
+  function bindStatusInteractions(root) {
+    root.querySelectorAll('[data-rollback-chapter]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const chapterNumber = button.dataset.rollbackChapter;
+        if (!chapterNumber || !state.lastPayload?.novelId) return;
+        button.disabled = true;
+        button.textContent = `回滚第${chapterNumber}章中...`;
+        try {
+          const response = await fetch(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(state.lastPayload.novelId)}/chapters/${encodeURIComponent(chapterNumber)}/rollback`, { method: 'POST' });
+          if (!response.ok) throw new Error(`Rollback failed: ${response.status}`);
+        } finally {
+          await openPanel();
+          state.activeTab = 'status';
+          renderPanel(document.getElementById('ewa-drawer'));
+        }
+      });
+    });
   }
 
   function setLoading(drawer, message) {

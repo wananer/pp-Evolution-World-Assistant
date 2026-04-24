@@ -52,9 +52,43 @@ async def test_manual_rebuild_replays_chapter_payloads(tmp_path):
         }
     )
 
-    assert result == {"ok": True, "data": {"novel_id": "novel-2", "rebuilt_chapters": [1, 2]}}
+    assert result["ok"] is True
+    assert result["data"]["novel_id"] == "novel-2"
+    assert result["data"]["rebuilt_chapters"] == [1, 2]
+    assert result["data"]["characters_rebuilt"] == 1
     card = service.get_character("novel-2", "沈月")
     assert card is not None
     assert card["last_seen_chapter"] == 2
     timeline = service.list_character_timeline("novel-2", card["character_id"])
     assert len(timeline["items"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_rollback_removes_snapshot_and_rebuilds_character_cards(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.manual_rebuild(
+        {
+            "novel_id": "novel-3",
+            "chapters": [
+                {"number": 1, "content": "《林澈》抵达雾城。顾衡交给林澈一枚钥匙。"},
+                {"number": 2, "content": "林澈离开雾城，顾衡留在黑塔。"},
+            ],
+        }
+    )
+
+    before = service.list_snapshots("novel-3")
+    assert [item["chapter_number"] for item in before["items"]] == [1, 2]
+
+    result = await service.rollback({"novel_id": "novel-3", "chapter_number": 2})
+
+    assert result["ok"] is True
+    assert result["data"]["removed_snapshot"] is True
+    after = service.list_snapshots("novel-3")
+    assert [item["chapter_number"] for item in after["items"]] == [1]
+    card = service.get_character("novel-3", "林澈")
+    assert card is not None
+    assert card["last_seen_chapter"] == 1
+    runs = service.list_runs("novel-3")
+    assert any(run["hook_name"] == "rollback" for run in runs["items"])

@@ -43,6 +43,26 @@ async def get_character_timeline(novel_id: str, character_id: str):
     return timeline
 
 
+@router.get("/novels/{novel_id}/runs")
+async def list_runs(novel_id: str, limit: int = 50):
+    return _service.list_runs(novel_id, limit=limit)
+
+
+@router.get("/novels/{novel_id}/snapshots")
+async def list_snapshots(novel_id: str):
+    return _service.list_snapshots(novel_id)
+
+
+@router.get("/novels/{novel_id}/events")
+async def list_events(novel_id: str):
+    return _service.list_events(novel_id)
+
+
+@router.post("/novels/{novel_id}/chapters/{chapter_number}/rollback")
+async def rollback_chapter(novel_id: str, chapter_number: int, payload: Optional[dict] = None):
+    return await _service.rollback({"novel_id": novel_id, "chapter_number": chapter_number, "trigger_type": "manual", **(payload or {})})
+
+
 @router.post("/novels/{novel_id}/chapters/{chapter_number}/rerun")
 async def rerun_chapter(novel_id: str, chapter_number: int, payload: Optional[dict] = None):
     body = payload or {}
