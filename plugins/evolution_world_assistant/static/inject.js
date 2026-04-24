@@ -8,6 +8,8 @@
   const pluginName = 'evolution_world_assistant';
   const state = {
     activeTab: 'characters',
+    viewMode: 'novel',
+    selectedCharacterId: null,
     lastPayload: null,
   };
 
@@ -107,35 +109,110 @@
         <article><b>${countEvents(items)}</b><span>动态记录</span></article>
         <article><b>${escapeHtml(payload.novelId)}</b><span>当前小说</span></article>
       </section>
-      <section class="ewa-section">
+      ${state.viewMode === 'detail' ? renderCharacterDetail(items) : renderNovelCard(payload, items)}
+    `;
+    bindCharacterInteractions(content);
+  }
+
+  function renderNovelCard(payload, items) {
+    const coverNames = items.slice(0, 3).map((item) => escapeHtml((item.name || '?').slice(0, 1))).join('');
+    return `
+      <section class="ewa-section ewa-novel-stage">
         <div class="ewa-section-head">
-          <h3>角色状态</h3>
-          <p>按章节事实驱动，只记录已发生内容</p>
+          <h3>小说卡片</h3>
+          <p>先进入小说，再查看人物卡册</p>
         </div>
-        <div class="ewa-role-list">
-          ${items.map(renderRoleCard).join('')}
+        <article class="ewa-novel-card" data-open-roster="1">
+          <div class="ewa-novel-cover">
+            <span>${coverNames || 'EW'}</span>
+            <i>Evolution</i>
+          </div>
+          <div class="ewa-novel-info">
+            <p class="ewa-card-label">当前小说</p>
+            <h4>${escapeHtml(payload.novelId)}</h4>
+            <p>已生成 ${items.length} 张人物卡，记录 ${countEvents(items)} 条章节动态。</p>
+            <div class="ewa-chip-row">
+              <em>角色卡册</em><em>事实驱动</em><em>点击进入</em>
+            </div>
+          </div>
+        </article>
+        <div class="ewa-card-roster">
+          ${items.map(renderCharacterGameCard).join('')}
         </div>
       </section>
     `;
   }
 
-  function renderRoleCard(item) {
+  function renderCharacterGameCard(item) {
     const latest = (item.recent_events || []).at(-1) || {};
-    const locations = Array.isArray(latest.locations) ? latest.locations.slice(0, 4) : [];
+    const locations = Array.isArray(latest.locations) ? latest.locations.slice(0, 3) : [];
+    const intro = latest.summary || `${item.name || '角色'}在第${item.last_seen_chapter || '-'}章出现。`;
     return `
-      <article class="ewa-role-card">
-        <div class="ewa-role-avatar">${escapeHtml((item.name || '?').slice(0, 1))}</div>
-        <div class="ewa-role-main">
-          <div class="ewa-role-topline">
-            <h4>${escapeHtml(item.name || item.character_id)}</h4>
-            <span>${escapeHtml(item.status || 'active')}</span>
-          </div>
+      <button type="button" class="ewa-game-card" data-character-id="${escapeAttr(item.character_id || item.name)}">
+        <div class="ewa-game-card-art"><span>${escapeHtml((item.name || '?').slice(0, 1))}</span></div>
+        <div class="ewa-game-card-body">
+          <div class="ewa-role-topline"><h4>${escapeHtml(item.name || item.character_id)}</h4><span>${escapeHtml(item.status || 'active')}</span></div>
           <p class="ewa-role-meta">首次第${item.first_seen_chapter || '-'}章 · 最近第${item.last_seen_chapter || '-'}章</p>
-          <p class="ewa-role-event">${escapeHtml(latest.summary || '暂无独立动态')}</p>
+          <p class="ewa-role-event">${escapeHtml(intro)}</p>
           ${locations.length ? `<div class="ewa-chip-row">${locations.map((loc) => `<em>${escapeHtml(loc)}</em>`).join('')}</div>` : ''}
         </div>
-      </article>
+      </button>
     `;
+  }
+
+  function renderCharacterDetail(items) {
+    const item = items.find((entry) => entry.character_id === state.selectedCharacterId) || items[0];
+    if (!item) return '';
+    const events = item.recent_events || [];
+    const latest = events.at(-1) || {};
+    const locations = Array.isArray(latest.locations) ? latest.locations.slice(0, 6) : [];
+    return `
+      <section class="ewa-section ewa-character-detail">
+        <button type="button" class="ewa-back" data-back-roster>← 返回小说卡片</button>
+        <article class="ewa-character-hero">
+          <div class="ewa-character-portrait"><span>${escapeHtml((item.name || '?').slice(0, 1))}</span></div>
+          <div>
+            <p class="ewa-card-label">人物卡</p>
+            <h3>${escapeHtml(item.name || item.character_id)}</h3>
+            <p class="ewa-character-intro">${escapeHtml(latest.summary || '暂无简介。')}</p>
+            <div class="ewa-chip-row">
+              <em>${escapeHtml(item.status || 'active')}</em>
+              <em>首次第${item.first_seen_chapter || '-'}章</em>
+              <em>最近第${item.last_seen_chapter || '-'}章</em>
+              ${locations.map((loc) => `<em>${escapeHtml(loc)}</em>`).join('')}
+            </div>
+          </div>
+        </article>
+        <div class="ewa-section-head ewa-detail-head">
+          <h3>角色动态</h3>
+          <p>按章节倒序显示</p>
+        </div>
+        <ol class="ewa-timeline">
+          ${events.slice().reverse().map((event) => `
+            <li><span>第${event.chapter_number || '-'}章</span><strong>${escapeHtml(item.name || '')}</strong><p>${escapeHtml(event.summary || '')}</p></li>
+          `).join('') || '<li><p>暂无动态</p></li>'}
+        </ol>
+      </section>
+    `;
+  }
+
+  function bindCharacterInteractions(root) {
+    root.querySelector('[data-open-roster]')?.addEventListener('click', () => {
+      state.viewMode = 'roster';
+      renderPanel(document.getElementById('ewa-drawer'));
+    });
+    root.querySelectorAll('[data-character-id]').forEach((card) => {
+      card.addEventListener('click', () => {
+        state.viewMode = 'detail';
+        state.selectedCharacterId = card.dataset.characterId;
+        renderPanel(document.getElementById('ewa-drawer'));
+      });
+    });
+    root.querySelector('[data-back-roster]')?.addEventListener('click', () => {
+      state.viewMode = 'novel';
+      state.selectedCharacterId = null;
+      renderPanel(document.getElementById('ewa-drawer'));
+    });
   }
 
   function renderEvents(drawer, payload) {
@@ -199,6 +276,10 @@
 
   function escapeHtml(value) {
     return String(value || '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+  }
+
+  function escapeAttr(value) {
+    return escapeHtml(value).replace(/'/g, '&#39;');
   }
 
   runtime.plugins.register({

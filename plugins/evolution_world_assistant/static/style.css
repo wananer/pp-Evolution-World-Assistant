@@ -144,3 +144,196 @@
   #ewa-drawer { top: 12px; right: 12px; left: 12px; width: auto; }
   .ewa-summary-grid { grid-template-columns: 1fr; }
 }
+
+.ewa-novel-stage {
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.52), rgba(49, 46, 129, 0.26)),
+    rgba(15,23,42,0.48);
+}
+
+.ewa-novel-card {
+  display: grid;
+  grid-template-columns: 118px 1fr;
+  gap: 16px;
+  padding: 14px;
+  margin-bottom: 14px;
+  border-radius: 22px;
+  border: 1px solid rgba(167,139,250,0.28);
+  background: radial-gradient(circle at 16% 20%, rgba(34,211,238,0.2), transparent 34%), linear-gradient(135deg, rgba(30,41,59,0.9), rgba(67,56,202,0.24));
+  cursor: pointer;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ewa-novel-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(34,211,238,0.48);
+  box-shadow: 0 16px 36px rgba(8, 145, 178, 0.16);
+}
+
+.ewa-novel-cover {
+  min-height: 154px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 35% 25%, rgba(255,255,255,0.26), transparent 24%),
+    linear-gradient(160deg, #312e81, #0891b2 48%, #111827);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.16), 0 18px 38px rgba(2,6,23,0.28);
+}
+
+.ewa-novel-cover span {
+  font-size: 26px;
+  font-weight: 950;
+  letter-spacing: -0.08em;
+  color: #fff;
+  text-shadow: 0 6px 18px rgba(0,0,0,0.35);
+}
+
+.ewa-novel-cover i {
+  position: absolute;
+  bottom: 12px;
+  font-style: normal;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.72);
+}
+
+.ewa-card-label {
+  margin: 0 0 5px;
+  color: var(--ewa-accent-2);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ewa-novel-info h4 {
+  margin: 0;
+  color: #fff;
+  font-size: 22px;
+}
+
+.ewa-novel-info > p:not(.ewa-card-label) {
+  margin: 10px 0 0;
+  color: #cbd5e1;
+  line-height: 1.55;
+}
+
+.ewa-card-roster {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.ewa-game-card {
+  min-height: 218px;
+  padding: 0;
+  border: 1px solid rgba(148,163,184,0.16);
+  border-radius: 20px;
+  overflow: hidden;
+  text-align: left;
+  color: var(--ewa-text);
+  background: rgba(15,23,42,0.58);
+  cursor: pointer;
+  box-shadow: 0 14px 28px rgba(2,6,23,0.18);
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ewa-game-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(167,139,250,0.52);
+  box-shadow: 0 22px 44px rgba(76,29,149,0.26);
+}
+
+.ewa-game-card-art {
+  height: 92px;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 50% 18%, rgba(255,255,255,0.26), transparent 26px),
+    linear-gradient(135deg, rgba(14,165,233,0.72), rgba(124,58,237,0.72));
+}
+
+.ewa-game-card-art span {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  background: rgba(15,23,42,0.38);
+  font-size: 28px;
+  font-weight: 950;
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.18);
+}
+
+.ewa-game-card-body {
+  padding: 12px;
+}
+
+.ewa-character-detail {
+  background: linear-gradient(135deg, rgba(15,23,42,0.58), rgba(49,46,129,0.26));
+}
+
+.ewa-back {
+  margin-bottom: 12px;
+  border: 1px solid rgba(167,139,250,0.28);
+  border-radius: 999px;
+  color: #ede9fe;
+  background: rgba(124,58,237,0.16);
+  padding: 7px 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.ewa-character-hero {
+  display: grid;
+  grid-template-columns: 128px 1fr;
+  gap: 16px;
+  align-items: stretch;
+  padding: 14px;
+  border-radius: 24px;
+  background: radial-gradient(circle at 18% 18%, rgba(34,211,238,0.18), transparent 30%), rgba(30,41,59,0.62);
+  border: 1px solid rgba(148,163,184,0.16);
+}
+
+.ewa-character-portrait {
+  min-height: 180px;
+  border-radius: 22px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(160deg, #0f172a, #4338ca 48%, #0891b2);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
+}
+
+.ewa-character-portrait span {
+  font-size: 56px;
+  font-weight: 950;
+  color: #fff;
+  text-shadow: 0 12px 28px rgba(0,0,0,0.42);
+}
+
+.ewa-character-hero h3 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.ewa-character-intro {
+  margin: 10px 0 0;
+  color: #e2e8f0;
+  line-height: 1.65;
+  font-weight: 700;
+}
+
+.ewa-detail-head {
+  margin-top: 16px;
+}
+
+@media (max-width: 640px) {
+  .ewa-novel-card,
+  .ewa-character-hero { grid-template-columns: 1fr; }
+  .ewa-card-roster { grid-template-columns: 1fr; }
+}
