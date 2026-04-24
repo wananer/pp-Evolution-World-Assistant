@@ -164,7 +164,7 @@ def _render_focus_characters(characters: list[dict[str, Any]]) -> str:
     lines = []
     for card in characters:
         latest = (card.get("recent_events") or [])[-1] if card.get("recent_events") else {}
-        summary = latest.get("summary") or "暂无近期动态"
+        summary = _clean_display_text(latest.get("summary") or "暂无近期动态")
         reasons = "、".join((card.get("injection_relevance") or {}).get("reasons") or [])
         reason_suffix = f"；相关性：{reasons}" if reasons else ""
         lines.append(
@@ -177,10 +177,15 @@ def _render_background_constraints(characters: list[dict[str, Any]]) -> str:
     lines = []
     for card in characters:
         latest = (card.get("recent_events") or [])[-1] if card.get("recent_events") else {}
-        summary = latest.get("summary") or "暂无近期动态"
+        summary = _clean_display_text(latest.get("summary") or "暂无近期动态")
         reasons = "、".join((card.get("injection_relevance") or {}).get("reasons") or [])
         lines.append(f"- {card.get('name')}：与本章有背景关联（{reasons or '地点/物件相关'}），只作为连续性约束；不要因此强制安排出场。近期状态：{summary}")
     return "\n".join(lines)
+
+
+def _clean_display_text(value: str) -> str:
+    text = str(value or "")
+    return text.replace("《", "").replace("》", "")
 
 
 def _render_facts(facts: list[dict[str, Any]]) -> str:
@@ -188,7 +193,7 @@ def _render_facts(facts: list[dict[str, Any]]) -> str:
     for fact in facts:
         locations = "、".join(fact.get("locations") or [])
         location_suffix = f" 地点：{locations}" if locations else ""
-        lines.append(f"- 第{fact.get('chapter_number')}章：{fact.get('summary') or ''}{location_suffix}")
+        lines.append(f"- 第{fact.get('chapter_number')}章：{_clean_display_text(fact.get('summary') or '')}{location_suffix}")
     return "\n".join(lines)
 
 

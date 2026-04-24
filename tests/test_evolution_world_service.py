@@ -34,6 +34,8 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     assert context["ok"] is True
     content = context["context_blocks"][0]["content"]
     assert "本章焦点角色" in content
+    assert "林澈" in content
+    assert "《林澈》" not in content
     assert "雾城" in content
     patch = context["context_patch"]
     assert patch["merge_strategy"] == "append_by_priority"
@@ -288,3 +290,4 @@ async def test_context_patch_separates_background_constraints_from_focus(tmp_pat
     assert [item["name"] for item in background["items"]] == ["沈月"]
     assert "只作为连续性约束" in background["content"]
     assert "不要因此强制安排出场" in background["content"]
+    assert "《沈月》" not in background["content"]
