@@ -1,7 +1,7 @@
 """Sidecar repositories for Evolution World plugin state."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional, Union, Tuple
 
 from plugins.platform.plugin_storage import PluginStorage
 
@@ -11,7 +11,7 @@ PLUGIN_NAME = "evolution_world_assistant"
 
 
 class EvolutionWorldRepository:
-    def __init__(self, storage: PluginStorage | None = None) -> None:
+    def __init__(self, storage: Optional[PluginStorage] = None) -> None:
         self.storage = storage or PluginStorage()
 
     def save_fact_snapshot(self, snapshot: ChapterFactSnapshot) -> None:
@@ -21,7 +21,7 @@ class EvolutionWorldRepository:
             snapshot.to_dict(),
         )
 
-    def list_fact_snapshots(self, novel_id: str, before_chapter: int | None = None) -> list[dict[str, Any]]:
+    def list_fact_snapshots(self, novel_id: str, before_chapter: Optional[int] = None) -> list[dict[str, Any]]:
         facts_root = self.storage.root / PLUGIN_NAME / "novels" / novel_id / "facts"
         if not facts_root.exists():
             return []
@@ -65,7 +65,7 @@ class EvolutionWorldRepository:
     def list_character_cards(self, novel_id: str) -> dict[str, Any]:
         return self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "characters.json"], default={"items": []})
 
-    def get_character_card(self, novel_id: str, character_id: str) -> dict[str, Any] | None:
+    def get_character_card(self, novel_id: str, character_id: str) -> Optional[dict[str, Any]]:
         for card in self.list_character_cards(novel_id)["items"]:
             if card.get("character_id") == character_id or card.get("name") == character_id:
                 return card
@@ -79,7 +79,7 @@ def _chapter_sort_key(path):
     return _int_or_none(path.stem.replace("chapter_", "")) or 0
 
 
-def _int_or_none(value: Any) -> int | None:
+def _int_or_none(value: Any) -> Optional[int]:
     try:
         number = int(value)
     except (TypeError, ValueError):

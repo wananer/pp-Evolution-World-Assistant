@@ -1,7 +1,7 @@
 """Runtime contracts shared by PlotPilot plugin platform components."""
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, TypedDict
 
 PluginHookName = Literal[
     "before_context_build",
@@ -35,12 +35,12 @@ class PluginContextBlock(TypedDict, total=False):
     metadata: dict[str, Any]
 
 
-class PluginHookResult(TypedDict):
+class PluginHookResult(TypedDict, total=False):
     plugin_name: str
     hook_name: str
     ok: bool
-    skipped: NotRequired[bool]
-    reason: NotRequired[str]
-    context_blocks: NotRequired[list[PluginContextBlock]]
-    data: NotRequired[dict[str, Any]]
-    error: NotRequired[str]
+    skipped: bool
+    reason: str
+    context_blocks: list[PluginContextBlock]
+    data: dict[str, Any]
+    error: str

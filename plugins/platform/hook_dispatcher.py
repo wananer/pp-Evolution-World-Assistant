@@ -5,13 +5,13 @@ import inspect
 import logging
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Optional, Union, Tuple
 
 from .runtime_types import PluginHookPayload, PluginHookResult
 
 logger = logging.getLogger(__name__)
 
-HookHandler = Callable[[PluginHookPayload], PluginHookResult | Awaitable[PluginHookResult] | dict[str, Any] | Awaitable[dict[str, Any]] | None]
+HookHandler = Callable[[PluginHookPayload], Any]
 _HOOKS: dict[str, list[tuple[str, HookHandler]]] = defaultdict(list)
 
 
@@ -34,7 +34,7 @@ def list_hooks() -> dict[str, list[str]]:
     return {hook_name: [plugin_name for plugin_name, _ in handlers] for hook_name, handlers in _HOOKS.items()}
 
 
-async def dispatch_hook(hook_name: str, payload: PluginHookPayload | None = None) -> list[PluginHookResult]:
+async def dispatch_hook(hook_name: str, payload: Optional[PluginHookPayload] = None) -> list[PluginHookResult]:
     results: list[PluginHookResult] = []
     for plugin_name, handler in list(_HOOKS.get(hook_name, [])):
         hook_payload: PluginHookPayload = {**(payload or {}), "plugin_name": plugin_name}

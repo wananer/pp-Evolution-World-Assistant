@@ -23,14 +23,14 @@ class PluginJobRecord:
     trigger_type: str
     dedup_key: str
     id: str = field(default_factory=lambda: str(uuid4()))
-    chapter_id: str | None = None
-    chapter_number: int | None = None
-    request_id: str | None = None
-    content_hash: str | None = None
+    chapter_id: Optional[str] = None
+    chapter_number: Optional[int] = None
+    request_id: Optional[str] = None
+    content_hash: Optional[str] = None
     status: JobStatus = "pending"
     input_json: dict[str, Any] = field(default_factory=dict)
-    output_json: dict[str, Any] | None = None
-    error: str | None = None
+    output_json: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
 
@@ -39,7 +39,7 @@ class PluginJobRecord:
 
 
 class PluginJobRegistry:
-    def __init__(self, storage: PluginStorage | None = None) -> None:
+    def __init__(self, storage: Optional[PluginStorage] = None) -> None:
         self.storage = storage or PluginStorage()
 
     def append(self, record: PluginJobRecord) -> None:
@@ -50,8 +50,8 @@ class PluginJobRegistry:
         plugin_name: str,
         hook_name: str,
         novel_id: str,
-        chapter_number: int | None = None,
-        content_hash: str | None = None,
+        chapter_number: Optional[int] = None,
+        content_hash: Optional[str] = None,
         trigger_type: str = "auto",
     ) -> str:
         parts = [plugin_name, hook_name, novel_id, str(chapter_number or ""), content_hash or "", trigger_type]

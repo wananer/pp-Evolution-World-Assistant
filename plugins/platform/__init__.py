@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from .hook_dispatcher import clear_hooks, dispatch_hook, list_hooks, register_hook
+from .host_facade import PlotPilotPluginHost
 from .job_registry import PluginJobRecord, PluginJobRegistry
 from .plugin_storage import PluginStorage
 from .runtime_types import PluginHookPayload, PluginHookResult
 
 __all__ = [
+    "PlotPilotPluginHost",
     "PluginHookPayload",
     "PluginHookResult",
     "PluginJobRecord",

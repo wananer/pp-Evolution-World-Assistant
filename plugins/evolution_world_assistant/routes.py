@@ -1,6 +1,8 @@
 """HTTP API for the PlotPilot Evolution World Assistant plugin."""
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 
 from .service import EvolutionWorldAssistantService
@@ -42,7 +44,7 @@ async def get_character_timeline(novel_id: str, character_id: str):
 
 
 @router.post("/novels/{novel_id}/chapters/{chapter_number}/rerun")
-async def rerun_chapter(novel_id: str, chapter_number: int, payload: dict | None = None):
+async def rerun_chapter(novel_id: str, chapter_number: int, payload: Optional[dict] = None):
     body = payload or {}
     content = str(body.get("content") or "").strip()
     if not content:
@@ -58,5 +60,5 @@ async def rerun_chapter(novel_id: str, chapter_number: int, payload: dict | None
 
 
 @router.post("/novels/{novel_id}/rebuild")
-async def rebuild_novel(novel_id: str, payload: dict | None = None):
+async def rebuild_novel(novel_id: str, payload: Optional[dict] = None):
     return await _service.manual_rebuild({"novel_id": novel_id, "trigger_type": "manual", **(payload or {})})

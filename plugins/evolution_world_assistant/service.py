@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any
+from typing import Any, Optional, Union, Tuple
 
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
@@ -17,9 +17,9 @@ PLUGIN_NAME = "evolution_world_assistant"
 class EvolutionWorldAssistantService:
     def __init__(
         self,
-        storage: PluginStorage | None = None,
-        jobs: PluginJobRegistry | None = None,
-        repository: EvolutionWorldRepository | None = None,
+        storage: Optional[PluginStorage] = None,
+        jobs: Optional[PluginJobRegistry] = None,
+        repository: Optional[EvolutionWorldRepository] = None,
     ) -> None:
         self.storage = storage or PluginStorage()
         self.jobs = jobs or PluginJobRegistry(self.storage)
@@ -43,6 +43,10 @@ class EvolutionWorldAssistantService:
             trigger_type=trigger_type,
         )
         snapshot = extract_chapter_facts(novel_id, chapter_number, content_hash, content, _now())
+        known_names = [card.get("name") for card in self.repository.list_character_cards(novel_id).get("items", [])]
+        for name in known_names:
+            if name and name in content and name not in snapshot.characters:
+                snapshot.characters.append(name)
         self.repository.save_fact_snapshot(snapshot)
         updated_cards = self.repository.upsert_character_cards(novel_id, snapshot)
         self.repository.append_event(
@@ -126,7 +130,7 @@ class EvolutionWorldAssistantService:
     def list_characters(self, novel_id: str) -> dict[str, Any]:
         return self.repository.list_character_cards(novel_id)
 
-    def get_character(self, novel_id: str, character_id: str) -> dict[str, Any] | None:
+    def get_character(self, novel_id: str, character_id: str) -> Optional[dict[str, Any]]:
         return self.repository.get_character_card(novel_id, character_id)
 
     def list_character_timeline(self, novel_id: str, character_id: str) -> dict[str, Any]:
@@ -135,7 +139,7 @@ class EvolutionWorldAssistantService:
             return {"items": []}
         return {"character": card, "items": card.get("recent_events", [])}
 
-    def build_context_summary(self, novel_id: str, chapter_number: int | None) -> str:
+    def build_context_summary(self, novel_id: str, chapter_number: Optional[int]) -> str:
         facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
         if not facts:
             return ""
@@ -166,7 +170,7 @@ def _hash_text(content: str) -> str:
     return sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
-def _int_or_none(value: Any) -> int | None:
+def _int_or_none(value: Any) -> Optional[int]:
     try:
         number = int(value)
     except (TypeError, ValueError):
