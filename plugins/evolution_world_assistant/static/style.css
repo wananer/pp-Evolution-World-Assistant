@@ -1,0 +1,19 @@
+#ewa-panel-button {
+  position: fixed;
+  right: 18px;
+  bottom: 86px;
+  z-index: 9999;
+  width: 46px;
+  height: 46px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #6366f1, #a855f7);
+  color: #fff;
+  font-weight: 800;
+  box-shadow: 0 12px 28px rgba(79, 70, 229, 0.35);
+  cursor: pointer;
+}
+
+#ewa-panel-button:hover {
+  transform: translateY(-1px);
+}

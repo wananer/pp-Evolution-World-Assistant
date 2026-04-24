@@ -1,0 +1,38 @@
+{
+  "name": "evolution_world_assistant",
+  "display_name": "Evolution World Assistant",
+  "version": "0.1.0",
+  "enabled": true,
+  "runtime": {
+    "type": "plotpilot_plugin",
+    "api_version": "0.2",
+    "entry": "static/inject.js",
+    "style": "static/style.css"
+  },
+  "capabilities": {
+    "frontend_panel": true,
+    "background_jobs": true,
+    "llm": true,
+    "context_injection": true,
+    "chapter_postprocess": true,
+    "manual_rebuild": true,
+    "rollback": true
+  },
+  "hooks": [
+    "before_context_build",
+    "after_commit",
+    "manual_rebuild",
+    "rollback"
+  ],
+  "permissions": [
+    "read_novel",
+    "read_chapter",
+    "write_plugin_storage",
+    "use_llm",
+    "inject_context"
+  ],
+  "frontend": {
+    "scripts": ["static/inject.js"],
+    "styles": ["static/style.css"]
+  }
+}
