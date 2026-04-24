@@ -9,6 +9,7 @@ from typing import Any, Optional, Union, Tuple
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
+from .context_patch import build_context_patch, render_patch_summary
 from .repositories import EvolutionWorldRepository
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
@@ -118,20 +119,22 @@ class EvolutionWorldAssistantService:
         if not novel_id:
             return {"ok": True, "skipped": True, "reason": "missing novel_id"}
 
-        summary = self.build_context_summary(novel_id, chapter_number)
+        patch = self.build_context_patch(novel_id, chapter_number)
+        summary = render_patch_summary(patch)
         if not summary:
             return {"ok": True, "skipped": True, "reason": "no evolution state yet"}
 
         return {
             "ok": True,
+            "context_patch": patch,
             "context_blocks": [
                 {
                     "plugin_name": PLUGIN_NAME,
                     "title": "Evolution World State",
                     "content": summary,
                     "priority": 60,
-                    "token_budget": 1200,
-                    "metadata": {"novel_id": novel_id, "chapter_number": chapter_number},
+                    "token_budget": patch.get("estimated_token_budget") or 1200,
+                    "metadata": {"novel_id": novel_id, "chapter_number": chapter_number, "patch_schema_version": patch.get("schema_version")},
                 }
             ],
         }
@@ -228,26 +231,13 @@ class EvolutionWorldAssistantService:
             return {"items": []}
         return {"character": card, "items": card.get("recent_events", [])}
 
-    def build_context_summary(self, novel_id: str, chapter_number: Optional[int]) -> str:
+    def build_context_patch(self, novel_id: str, chapter_number: Optional[int]) -> dict[str, Any]:
         facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
-        if not facts:
-            return ""
-        lines: list[str] = []
         characters = self.repository.list_character_cards(novel_id).get("items", [])
-        if characters:
-            lines.append("【动态角色状态】")
-            for card in characters[:10]:
-                lines.append(
-                    f"- {card.get('name')}：首次第{card.get('first_seen_chapter')}章，最近第{card.get('last_seen_chapter')}章出现。"
-                )
-        lines.append("【近期章节事实】")
-        for fact in facts[-5:]:
-            chapter = fact.get("chapter_number")
-            summary = fact.get("summary") or ""
-            locations = "、".join(fact.get("locations") or [])
-            suffix = f" 地点：{locations}" if locations else ""
-            lines.append(f"- 第{chapter}章：{summary}{suffix}")
-        return "\n".join(lines)
+        return build_context_patch(novel_id, chapter_number, characters, facts)
+
+    def build_context_summary(self, novel_id: str, chapter_number: Optional[int]) -> str:
+        return render_patch_summary(self.build_context_patch(novel_id, chapter_number))
 
 
 def _extract_content(payload: dict[str, Any]) -> str:

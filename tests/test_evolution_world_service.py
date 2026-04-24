@@ -35,6 +35,11 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     content = context["context_blocks"][0]["content"]
     assert "动态角色状态" in content
     assert "雾城" in content
+    patch = context["context_patch"]
+    assert patch["merge_strategy"] == "append_by_priority"
+    assert patch["estimated_token_budget"] > 0
+    assert [block["id"] for block in patch["blocks"]][:2] == ["dynamic_characters", "recent_facts"]
+    assert patch["blocks"][0]["kind"] == "character_state"
 
 
 @pytest.mark.asyncio
@@ -161,3 +166,27 @@ async def test_structured_provider_failure_falls_back_to_deterministic(tmp_path)
     assert result["data"]["extraction"]["source"] == "deterministic"
     assert "顾衡" in result["data"]["facts"]["characters"]
     assert result["data"]["extraction"]["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_context_patch_omits_future_chapter_facts(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.manual_rebuild(
+        {
+            "novel_id": "novel-6",
+            "chapters": [
+                {"number": 1, "content": "《林澈》抵达雾城。"},
+                {"number": 2, "content": "林澈进入黑塔，发现星港信标。"},
+            ],
+        }
+    )
+
+    context = await service.before_context_build({"novel_id": "novel-6", "chapter_number": 2})
+
+    assert context["ok"] is True
+    patch = context["context_patch"]
+    recent_facts = next(block for block in patch["blocks"] if block["id"] == "recent_facts")
+    assert [item["chapter_number"] for item in recent_facts["items"]] == [1]
+    assert "第2章" not in recent_facts["content"]
