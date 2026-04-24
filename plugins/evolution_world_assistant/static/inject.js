@@ -14,37 +14,14 @@
   };
 
   function ensurePanel() {
-    if (document.getElementById('ewa-panel-button')) return true;
-
-    const actionsGrid = document.querySelector('.quick-actions .actions-grid');
-    if (!actionsGrid) return false;
-
+    if (document.getElementById('ewa-panel-button')) return;
     const button = document.createElement('button');
     button.id = 'ewa-panel-button';
     button.type = 'button';
-    button.className = 'action-btn ewa-sidebar-entry';
-    button.innerHTML = `
-      <span class="action-icon ewa-sidebar-entry-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none">
-          <path d="M12 3.5 14.2 9l5.8 1.1-4.1 4.1 1 5.8L12 17.2 7.1 20l1-5.8L4 10.1 9.8 9 12 3.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-        </svg>
-      </span>
-      <span>插件平台</span>
-    `;
-    button.title = '打开 Evolution World 插件平台';
+    button.innerHTML = '<span class="ewa-fab-mark">✦</span><span class="ewa-fab-text">EW</span>';
+    button.title = 'Evolution World Assistant';
     button.addEventListener('click', openPanel);
-    actionsGrid.appendChild(button);
-    return true;
-  }
-
-  function schedulePanelMount() {
-    if (ensurePanel()) return;
-
-    const observer = new MutationObserver(() => {
-      if (ensurePanel()) observer.disconnect();
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-    window.setTimeout(() => observer.disconnect(), 10000);
+    document.body.appendChild(button);
   }
 
   function ensureDrawer() {
@@ -310,7 +287,7 @@
     display_name: 'Evolution World Assistant',
     version: '0.1.1',
     async init(ctx) {
-      schedulePanelMount();
+      ensurePanel();
       ctx.events.on('chapter:committed', (payload) => {
         ctx.events.emit('evolution-world:chapter_committed_seen', payload);
       });
