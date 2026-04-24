@@ -109,7 +109,7 @@
         <article><b>${countEvents(items)}</b><span>动态记录</span></article>
         <article><b>${escapeHtml(payload.novelId)}</b><span>当前小说</span></article>
       </section>
-      ${state.viewMode === 'detail' ? renderCharacterDetail(items) : renderNovelCard(payload, items)}
+      ${state.viewMode === 'detail' ? renderCharacterDetail(items) : state.viewMode === 'roster' ? renderCharacterRoster(items) : renderNovelCard(payload, items)}
     `;
     bindCharacterInteractions(content);
   }
@@ -136,6 +136,18 @@
             </div>
           </div>
         </article>
+      </section>
+    `;
+  }
+
+  function renderCharacterRoster(items) {
+    return `
+      <section class="ewa-section ewa-roster-stage">
+        <button type="button" class="ewa-back" data-back-novel>← 返回小说卡片</button>
+        <div class="ewa-section-head">
+          <h3>人物卡册</h3>
+          <p>选择人物卡查看详情</p>
+        </div>
         <div class="ewa-card-roster">
           ${items.map(renderCharacterGameCard).join('')}
         </div>
@@ -168,7 +180,7 @@
     const locations = Array.isArray(latest.locations) ? latest.locations.slice(0, 6) : [];
     return `
       <section class="ewa-section ewa-character-detail">
-        <button type="button" class="ewa-back" data-back-roster>← 返回小说卡片</button>
+        <button type="button" class="ewa-back" data-back-roster>← 返回人物卡册</button>
         <article class="ewa-character-hero">
           <div class="ewa-character-portrait"><span>${escapeHtml((item.name || '?').slice(0, 1))}</span></div>
           <div>
@@ -201,6 +213,11 @@
       state.viewMode = 'roster';
       renderPanel(document.getElementById('ewa-drawer'));
     });
+    root.querySelector('[data-back-novel]')?.addEventListener('click', () => {
+      state.viewMode = 'novel';
+      state.selectedCharacterId = null;
+      renderPanel(document.getElementById('ewa-drawer'));
+    });
     root.querySelectorAll('[data-character-id]').forEach((card) => {
       card.addEventListener('click', () => {
         state.viewMode = 'detail';
@@ -209,7 +226,7 @@
       });
     });
     root.querySelector('[data-back-roster]')?.addEventListener('click', () => {
-      state.viewMode = 'novel';
+      state.viewMode = 'roster';
       state.selectedCharacterId = null;
       renderPanel(document.getElementById('ewa-drawer'));
     });
