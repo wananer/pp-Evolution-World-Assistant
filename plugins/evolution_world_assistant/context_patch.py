@@ -18,20 +18,34 @@ def build_context_patch(
 ) -> dict[str, Any]:
     recent_facts = facts[-max_facts:]
     selection = _select_characters(characters, max_characters, outline=outline, recent_facts=recent_facts)
-    selected_characters = selection["selected"]
+    focus_characters = selection["focus"]
     background_characters = selection["background"]
+    offstage_characters = selection["offstage"]
     blocks = []
 
-    if selected_characters:
+    if focus_characters:
         blocks.append(
             {
-                "id": "dynamic_characters",
-                "title": "动态角色状态",
-                "kind": "character_state",
-                "priority": 72,
-                "token_budget": 420,
-                "content": _render_characters(selected_characters),
-                "items": selected_characters,
+                "id": "focus_characters",
+                "title": "本章焦点角色",
+                "kind": "focus_character_state",
+                "priority": 76,
+                "token_budget": 360,
+                "content": _render_focus_characters(focus_characters),
+                "items": focus_characters,
+            }
+        )
+
+    if background_characters:
+        blocks.append(
+            {
+                "id": "background_constraints",
+                "title": "背景约束角色",
+                "kind": "background_character_constraint",
+                "priority": 66,
+                "token_budget": 260,
+                "content": _render_background_constraints(background_characters),
+                "items": background_characters,
             }
         )
 
@@ -48,7 +62,7 @@ def build_context_patch(
             }
         )
 
-    risks = _build_risks(selected_characters, recent_facts, background_characters)
+    risks = _build_risks(focus_characters, recent_facts, offstage_characters)
     if risks:
         blocks.append(
             {
@@ -125,10 +139,17 @@ def _select_characters(
     scored.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
     has_outline = bool(outline_text.strip())
     if has_outline:
-        selected = [item[-1] for item in scored if item[0] >= 35][:limit]
-        background = [item[-1] for item in scored if item[-1] not in selected and item[0] > 0]
-        return {"selected": selected, "background": background[:4]}
-    return {"selected": [item[-1] for item in scored[:limit]], "background": []}
+        focus = [item[-1] for item in scored if item[0] >= 80][:limit]
+        background = [item[-1] for item in scored if 35 <= item[0] < 80][:4]
+        offstage = [item[-1] for item in scored if item[0] < 35 and _is_recent(item[-1], latest_chapter)][:4]
+        return {"focus": focus, "background": background, "offstage": offstage}
+    return {"focus": [item[-1] for item in scored[:limit]], "background": [], "offstage": []}
+
+
+def _is_recent(card: dict[str, Any], latest_chapter: int) -> bool:
+    if not latest_chapter:
+        return False
+    return int(card.get("last_seen_chapter") or 0) >= latest_chapter - 2
 
 
 def _extract_context_terms(text: str) -> list[str]:
@@ -139,14 +160,26 @@ def _extract_context_terms(text: str) -> list[str]:
     return terms
 
 
-def _render_characters(characters: list[dict[str, Any]]) -> str:
+def _render_focus_characters(characters: list[dict[str, Any]]) -> str:
     lines = []
     for card in characters:
         latest = (card.get("recent_events") or [])[-1] if card.get("recent_events") else {}
         summary = latest.get("summary") or "暂无近期动态"
+        reasons = "、".join((card.get("injection_relevance") or {}).get("reasons") or [])
+        reason_suffix = f"；相关性：{reasons}" if reasons else ""
         lines.append(
-            f"- {card.get('name')}：状态 {card.get('status') or 'active'}；首次第{card.get('first_seen_chapter')}章，最近第{card.get('last_seen_chapter')}章；{summary}"
+            f"- {card.get('name')}：状态 {card.get('status') or 'active'}；首次第{card.get('first_seen_chapter')}章，最近第{card.get('last_seen_chapter')}章；{summary}{reason_suffix}"
         )
+    return "\n".join(lines)
+
+
+def _render_background_constraints(characters: list[dict[str, Any]]) -> str:
+    lines = []
+    for card in characters:
+        latest = (card.get("recent_events") or [])[-1] if card.get("recent_events") else {}
+        summary = latest.get("summary") or "暂无近期动态"
+        reasons = "、".join((card.get("injection_relevance") or {}).get("reasons") or [])
+        lines.append(f"- {card.get('name')}：与本章有背景关联（{reasons or '地点/物件相关'}），只作为连续性约束；不要因此强制安排出场。近期状态：{summary}")
     return "\n".join(lines)
 
 
@@ -168,7 +201,7 @@ def _build_risks(characters: list[dict[str, Any]], facts: list[dict[str, Any]], 
             risks.append(f"这些角色较久未更新，重新登场前建议交代状态：{names}")
     if background_characters:
         names = "、".join(str(card.get("name")) for card in background_characters[:4])
-        risks.append(f"以下近期角色未被本章大纲明确召回，除非剧情需要，不要强行安排出场：{names}")
+        risks.append(f"以下近期角色未被本章大纲明确召回，保持离场/远端状态；除非剧情需要，不要强行安排出场：{names}")
     if facts:
         latest = facts[-1]
         if not latest.get("locations"):

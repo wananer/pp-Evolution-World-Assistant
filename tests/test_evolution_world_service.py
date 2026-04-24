@@ -33,13 +33,13 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     context = service.before_context_build({"novel_id": "novel-1", "chapter_number": 2})
     assert context["ok"] is True
     content = context["context_blocks"][0]["content"]
-    assert "动态角色状态" in content
+    assert "本章焦点角色" in content
     assert "雾城" in content
     patch = context["context_patch"]
     assert patch["merge_strategy"] == "append_by_priority"
     assert patch["estimated_token_budget"] > 0
-    assert [block["id"] for block in patch["blocks"]][:2] == ["dynamic_characters", "recent_facts"]
-    assert patch["blocks"][0]["kind"] == "character_state"
+    assert [block["id"] for block in patch["blocks"]][:2] == ["focus_characters", "recent_facts"]
+    assert patch["blocks"][0]["kind"] == "focus_character_state"
 
 
 @pytest.mark.asyncio
@@ -250,9 +250,41 @@ async def test_context_patch_filters_unmentioned_recent_characters_into_risks(tm
         }
     )
 
-    dynamic = next(block for block in context["context_patch"]["blocks"] if block["id"] == "dynamic_characters")
-    assert [item["name"] for item in dynamic["items"]] == ["林澈"]
+    focus = next(block for block in context["context_patch"]["blocks"] if block["id"] == "focus_characters")
+    assert [item["name"] for item in focus["items"]] == ["林澈"]
     risks = next(block for block in context["context_patch"]["blocks"] if block["id"] == "continuity_risks")
     assert "沈月" in risks["content"]
     assert "顾衡" in risks["content"]
     assert "不要强行安排出场" in risks["content"]
+
+
+
+@pytest.mark.asyncio
+async def test_context_patch_separates_background_constraints_from_focus(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.manual_rebuild(
+        {
+            "novel_id": "novel-9",
+            "chapters": [
+                {"number": 1, "content": "《林澈》在雾城得到黑色钥匙。"},
+                {"number": 2, "content": "《沈月》在星港追踪白鸦，发现银色罗盘。"},
+            ],
+        }
+    )
+
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-9",
+            "chapter_number": 3,
+            "payload": {"outline": "林澈进入星港，寻找白鸦留下的密门线索。"},
+        }
+    )
+
+    focus = next(block for block in context["context_patch"]["blocks"] if block["id"] == "focus_characters")
+    background = next(block for block in context["context_patch"]["blocks"] if block["id"] == "background_constraints")
+    assert [item["name"] for item in focus["items"]] == ["林澈"]
+    assert [item["name"] for item in background["items"]] == ["沈月"]
+    assert "只作为连续性约束" in background["content"]
+    assert "不要因此强制安排出场" in background["content"]
