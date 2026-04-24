@@ -407,3 +407,82 @@
   color: var(--ewa-muted);
   font-size: 12px;
 }
+
+.ewa-detail-box {
+  margin-top: 10px;
+}
+
+.ewa-inspector-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(167, 139, 250, 0.24);
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.62);
+}
+
+.ewa-run-card {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 10px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ewa-run-card strong,
+.ewa-run-card span {
+  grid-column: 1;
+}
+
+.ewa-run-card em {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  font-style: normal;
+  color: #bae6fd;
+  border: 1px solid rgba(34, 211, 238, 0.22);
+  background: rgba(8, 145, 178, 0.13);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.ewa-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.ewa-mini-action {
+  border: 1px solid rgba(34, 211, 238, 0.24);
+  border-radius: 999px;
+  color: #e0f2fe;
+  background: rgba(8, 145, 178, 0.16);
+  padding: 7px 12px;
+  cursor: pointer;
+  font-weight: 850;
+}
+
+.ewa-mini-action:hover {
+  border-color: rgba(34, 211, 238, 0.48);
+  background: rgba(8, 145, 178, 0.25);
+}
+
+.ewa-mini-action.is-danger {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.28);
+  background: rgba(127, 29, 29, 0.28);
+}
+
+.ewa-mini-action:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}

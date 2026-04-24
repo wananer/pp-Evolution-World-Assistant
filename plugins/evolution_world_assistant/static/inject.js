@@ -284,37 +284,101 @@
       <section class="ewa-section ewa-run-section">
         <div class="ewa-section-head">
           <h3>运行记录</h3>
-          <p>最近 ${runs.length} 次</p>
+          <p>最近 ${runs.length} 次 · 点击查看详情</p>
         </div>
         <ol class="ewa-run-list">
-          ${runs.map((run) => `
+          ${runs.map((run, index) => `
             <li>
-              <strong>${escapeHtml(run.hook_name || '-')}</strong>
-              <span>${escapeHtml(run.status || '-')} · 第${escapeHtml(run.chapter_number || '-')}章 · ${escapeHtml(run.trigger_type || '-')}</span>
+              <button type="button" class="ewa-run-card" data-run-index="${index}">
+                <strong>${escapeHtml(run.hook_name || '-')}</strong>
+                <span>${escapeHtml(run.status || '-')} · 第${escapeHtml(run.chapter_number || '-')}章 · ${escapeHtml(run.trigger_type || '-')}</span>
+                <em>${escapeHtml(run.output?.extraction_source || 'audited')}</em>
+              </button>
             </li>
           `).join('') || '<li><span>暂无运行记录</span></li>'}
         </ol>
+        <div data-run-detail class="ewa-detail-box"></div>
       </section>
       <section class="ewa-section ewa-run-section">
         <div class="ewa-section-head">
           <h3>章节快照</h3>
-          <p>可回滚后重建人物卡</p>
+          <p>查看详情、回滚后重建人物卡</p>
+        </div>
+        <div class="ewa-action-row">
+          <button type="button" class="ewa-mini-action" data-rebuild-derived>重建派生人物卡</button>
         </div>
         <div class="ewa-snapshot-grid">
-          ${snapshots.map((snapshot) => `
-            <button type="button" class="ewa-snapshot-card" data-rollback-chapter="${escapeAttr(snapshot.chapter_number)}">
+          ${snapshots.map((snapshot, index) => `
+            <button type="button" class="ewa-snapshot-card" data-snapshot-index="${index}">
               <b>第${escapeHtml(snapshot.chapter_number)}章</b>
               <span>${escapeHtml((snapshot.characters || []).join('、') || '无角色')}</span>
             </button>
           `).join('') || '<p class="ewa-empty-inline">暂无快照</p>'}
         </div>
+        <div data-snapshot-detail class="ewa-detail-box"></div>
       </section>
     `;
-    bindStatusInteractions(content);
+    bindStatusInteractions(content, runs, snapshots);
   }
 
-  function bindStatusInteractions(root) {
+  function bindStatusInteractions(root, runs, snapshots) {
+    root.querySelectorAll('[data-run-index]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const run = runs[Number(button.dataset.runIndex)] || {};
+        const output = run.output || {};
+        root.querySelector('[data-run-detail]').innerHTML = `
+          <article class="ewa-inspector-card">
+            <div class="ewa-role-topline"><h4>${escapeHtml(run.hook_name || '运行记录')}</h4><span>${escapeHtml(run.status || '-')}</span></div>
+            <p class="ewa-role-meta">触发：${escapeHtml(run.trigger_type || '-')} · 第${escapeHtml(run.chapter_number || '-')}章 · ${escapeHtml(run.duration_ms ?? '-')}ms</p>
+            <dl class="ewa-status-list">
+              <div><dt>抽取来源</dt><dd>${escapeHtml(output.extraction_source || '-')}</dd></div>
+              <div><dt>角色</dt><dd>${escapeHtml((output.characters || []).join('、') || '-')}</dd></div>
+              <div><dt>地点</dt><dd>${escapeHtml((output.locations || []).join('、') || '-')}</dd></div>
+              <div><dt>Warnings</dt><dd>${escapeHtml((output.warnings || []).join('；') || '无')}</dd></div>
+            </dl>
+            ${(output.world_events || []).length ? `<ol class="ewa-timeline">${output.world_events.map((event) => `<li><p>${escapeHtml(event)}</p></li>`).join('')}</ol>` : ''}
+          </article>
+        `;
+      });
+    });
+    root.querySelectorAll('[data-snapshot-index]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const snapshot = snapshots[Number(button.dataset.snapshotIndex)] || {};
+        root.querySelector('[data-snapshot-detail]').innerHTML = `
+          <article class="ewa-inspector-card">
+            <div class="ewa-role-topline"><h4>第${escapeHtml(snapshot.chapter_number || '-')}章快照</h4><span>${escapeHtml(snapshot.content_hash || '-')}</span></div>
+            <p class="ewa-character-intro">${escapeHtml(snapshot.summary || '暂无摘要')}</p>
+            <div class="ewa-chip-row">
+              ${(snapshot.characters || []).map((item) => `<em>${escapeHtml(item)}</em>`).join('')}
+              ${(snapshot.locations || []).map((item) => `<em>${escapeHtml(item)}</em>`).join('')}
+            </div>
+            <div class="ewa-action-row">
+              <button type="button" class="ewa-mini-action is-danger" data-rollback-chapter="${escapeAttr(snapshot.chapter_number)}">回滚第${escapeHtml(snapshot.chapter_number)}章</button>
+            </div>
+          </article>
+        `;
+        bindRollbackButtons(root);
+      });
+    });
+    root.querySelector('[data-rebuild-derived]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      if (!state.lastPayload?.novelId) return;
+      button.disabled = true;
+      button.textContent = '重建中...';
+      try {
+        const response = await fetch(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(state.lastPayload.novelId)}/rebuild`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+        if (!response.ok) throw new Error(`Rebuild failed: ${response.status}`);
+      } finally {
+        await refreshStatusTab();
+      }
+    });
+    bindRollbackButtons(root);
+  }
+
+  function bindRollbackButtons(root) {
     root.querySelectorAll('[data-rollback-chapter]').forEach((button) => {
+      if (button.dataset.boundRollback === 'true') return;
+      button.dataset.boundRollback = 'true';
       button.addEventListener('click', async () => {
         const chapterNumber = button.dataset.rollbackChapter;
         if (!chapterNumber || !state.lastPayload?.novelId) return;
@@ -324,12 +388,16 @@
           const response = await fetch(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(state.lastPayload.novelId)}/chapters/${encodeURIComponent(chapterNumber)}/rollback`, { method: 'POST' });
           if (!response.ok) throw new Error(`Rollback failed: ${response.status}`);
         } finally {
-          await openPanel();
-          state.activeTab = 'status';
-          renderPanel(document.getElementById('ewa-drawer'));
+          await refreshStatusTab();
         }
       });
     });
+  }
+
+  async function refreshStatusTab() {
+    await openPanel();
+    state.activeTab = 'status';
+    renderPanel(document.getElementById('ewa-drawer'));
   }
 
   function setLoading(drawer, message) {
