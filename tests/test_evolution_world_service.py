@@ -92,3 +92,72 @@ async def test_rollback_removes_snapshot_and_rebuilds_character_cards(tmp_path):
     assert card["last_seen_chapter"] == 1
     runs = service.list_runs("novel-3")
     assert any(run["hook_name"] == "rollback" for run in runs["items"])
+
+
+class FakeStructuredProvider:
+    async def extract(self, request):
+        assert request["schema"]["required"] == ["summary", "characters", "locations", "world_events"]
+        return {
+            "summary": "林澈在雾城获得钥匙。",
+            "characters": [
+                {"name": "林澈", "summary": "获得黑色钥匙", "locations": ["雾城"], "confidence": 0.92},
+                {"name": "沈月", "summary": "追捕白鸦", "status": "active"},
+            ],
+            "locations": ["雾城", "黑塔"],
+            "world_events": [
+                {"summary": "林澈获得黑色钥匙", "event_type": "item", "characters": ["林澈"], "locations": ["黑塔"]}
+            ],
+        }
+
+
+class FailingStructuredProvider:
+    async def extract(self, request):
+        raise RuntimeError("provider offline")
+
+
+@pytest.mark.asyncio
+async def test_structured_provider_overrides_deterministic_extraction(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=FakeStructuredProvider(),
+    )
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-4",
+            "chapter_number": 1,
+            "payload": {"content": "这一章没有书名号，但结构化 provider 会返回人物。"},
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["extraction"]["source"] == "structured"
+    assert result["data"]["facts"]["characters"] == ["林澈", "沈月"]
+    assert result["data"]["facts"]["locations"] == ["雾城", "黑塔"]
+    runs = service.list_runs("novel-4")
+    assert runs["items"][-1]["output"]["extraction_source"] == "structured"
+
+
+@pytest.mark.asyncio
+async def test_structured_provider_failure_falls_back_to_deterministic(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=FailingStructuredProvider(),
+    )
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-5",
+            "chapter_number": 1,
+            "payload": {"content": "《顾衡》来到黑塔，发现雾城爆发异象。"},
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["extraction"]["source"] == "deterministic"
+    assert "顾衡" in result["data"]["facts"]["characters"]
+    assert result["data"]["extraction"]["warnings"]

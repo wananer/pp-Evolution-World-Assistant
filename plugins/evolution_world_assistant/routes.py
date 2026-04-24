@@ -17,8 +17,8 @@ async def get_status():
         "plugin_name": "evolution_world_assistant",
         "version": "0.1.0",
         "status": "installed",
-        "phase": "dynamic-rolecard-phase-1",
-        "capabilities": ["after_commit", "before_context_build", "character_cards", "manual_rebuild"],
+        "phase": "structured-extraction-phase-2",
+        "capabilities": ["after_commit", "before_context_build", "character_cards", "manual_rebuild", "structured_extraction", "deterministic_fallback", "rollback"],
     }
 
 

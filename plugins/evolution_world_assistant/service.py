@@ -9,8 +9,8 @@ from typing import Any, Optional, Union, Tuple
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
-from .extractor import extract_chapter_facts
 from .repositories import EvolutionWorldRepository
+from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
 PLUGIN_NAME = "evolution_world_assistant"
 
@@ -21,10 +21,12 @@ class EvolutionWorldAssistantService:
         storage: Optional[PluginStorage] = None,
         jobs: Optional[PluginJobRegistry] = None,
         repository: Optional[EvolutionWorldRepository] = None,
+        extractor_provider: Optional[StructuredExtractorProvider] = None,
     ) -> None:
         self.storage = storage or PluginStorage()
         self.jobs = jobs or PluginJobRegistry(self.storage)
         self.repository = repository or EvolutionWorldRepository(self.storage)
+        self.extractor_provider = extractor_provider
 
     async def after_commit(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -45,7 +47,15 @@ class EvolutionWorldAssistantService:
             content_hash=content_hash,
             trigger_type=trigger_type,
         )
-        snapshot = extract_chapter_facts(novel_id, chapter_number, content_hash, content, _now())
+        extraction = await extract_structured_chapter_facts(
+            novel_id,
+            chapter_number,
+            content_hash,
+            content,
+            _now(),
+            provider=self.extractor_provider,
+        )
+        snapshot = extraction.snapshot
         known_names = [card.get("name") for card in self.repository.list_character_cards(novel_id).get("items", [])]
         for name in known_names:
             if name and name in content and name not in snapshot.characters:
@@ -76,6 +86,8 @@ class EvolutionWorldAssistantService:
                     "characters": snapshot.characters,
                     "locations": snapshot.locations,
                     "world_events": snapshot.world_events,
+                    "extraction_source": extraction.source,
+                    "warnings": extraction.warnings,
                     "characters_updated": [card.get("character_id") for card in updated_cards],
                     "replaced_existing_snapshot": bool(previous_snapshot),
                 },
@@ -98,7 +110,7 @@ class EvolutionWorldAssistantService:
                 },
             )
         )
-        return {"ok": True, "data": {"facts": snapshot.to_dict(), "characters_updated": updated_cards}}
+        return {"ok": True, "data": {"facts": snapshot.to_dict(), "characters_updated": updated_cards, "extraction": extraction.to_dict()}}
 
     async def before_context_build(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
