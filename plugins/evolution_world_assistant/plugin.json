@@ -16,23 +16,30 @@
     "context_injection": true,
     "chapter_postprocess": true,
     "manual_rebuild": true,
-    "rollback": true
+    "rollback": true,
+    "chapter_review": true
   },
   "hooks": [
     "before_context_build",
     "after_commit",
     "manual_rebuild",
-    "rollback"
+    "rollback",
+    "review_chapter"
   ],
   "permissions": [
     "read_novel",
     "read_chapter",
     "write_plugin_storage",
     "use_llm",
-    "inject_context"
+    "inject_context",
+    "read_plugin_storage"
   ],
   "frontend": {
-    "scripts": ["static/inject.js"],
-    "styles": ["static/style.css"]
+    "scripts": [
+      "static/inject.js"
+    ],
+    "styles": [
+      "static/style.css"
+    ]
   }
 }

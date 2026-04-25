@@ -258,6 +258,48 @@ class EvolutionWorldAssistantService:
             return {"items": []}
         return {"character": card, "items": card.get("recent_events", [])}
 
+    def review_chapter(self, payload: dict[str, Any]) -> dict[str, Any]:
+        novel_id = str(payload.get("novel_id") or "").strip()
+        chapter_number = _int_or_none(payload.get("chapter_number"))
+        content = _extract_content(payload)
+        if not novel_id or not chapter_number or not content:
+            return {"ok": True, "skipped": True, "reason": "missing novel_id/chapter_number/content"}
+
+        cards = self.repository.list_character_cards(novel_id).get("items", [])
+        facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
+        issues: list[dict[str, Any]] = []
+        suggestions: list[str] = []
+
+        mentioned_cards = [card for card in cards if _character_is_mentioned(card, content)]
+        for card in mentioned_cards:
+            issues.extend(_review_character_card_against_content(card, content, chapter_number))
+
+        recent_characters = _recent_fact_characters(facts, limit=3)
+        mentioned_names = {str(card.get("name") or "") for card in mentioned_cards}
+        offstage_mentions = [name for name in recent_characters if name and name in content and name not in mentioned_names]
+        if offstage_mentions:
+            issues.append(
+                _review_issue(
+                    "evolution_plot_continuity",
+                    "suggestion",
+                    f"本章提到近期角色 {', '.join(offstage_mentions[:4])}，但未找到对应人物卡或别名匹配。",
+                    chapter_number,
+                    "如该角色实际出场，请先让章节提交/重建生成人物卡；如只是背景信息，避免写成已在场行动。",
+                )
+            )
+
+        if issues:
+            suggestions.append("Evolution 建议优先补足角色得知信息、能力越界或误信被修正的过渡，而不是直接删除剧情推进。")
+
+        return {
+            "ok": True,
+            "data": {
+                "issues": issues,
+                "suggestions": suggestions,
+                "reviewed_characters": [card.get("name") for card in mentioned_cards],
+            },
+        }
+
     def build_context_patch(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> dict[str, Any]:
         facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
         characters = self.repository.list_character_cards(novel_id).get("items", [])
@@ -266,6 +308,167 @@ class EvolutionWorldAssistantService:
     def build_context_summary(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> str:
         return render_patch_summary(self.build_context_patch(novel_id, chapter_number, outline=outline))
 
+
+
+def _character_is_mentioned(card: dict[str, Any], content: str) -> bool:
+    names = [card.get("name"), *(card.get("aliases") or [])]
+    return any(str(name or "").strip() and str(name).strip() in content for name in names)
+
+
+def _review_character_card_against_content(card: dict[str, Any], content: str, chapter_number: int) -> list[dict[str, Any]]:
+    name = str(card.get("name") or "角色").strip()
+    issues: list[dict[str, Any]] = []
+    cognitive = card.get("cognitive_state") if isinstance(card.get("cognitive_state"), dict) else {}
+    for unknown in _as_strings(cognitive.get("unknowns")):
+        if _looks_resolved_without_transition(content, unknown):
+            issues.append(
+                _review_issue(
+                    "evolution_character_cognition",
+                    "warning",
+                    f"{name} 在人物卡中仍标记为未知：{unknown}，但本章像是直接知道/利用了该信息。",
+                    chapter_number,
+                    "补充他如何得知、推断或误判这条信息；如果只是猜测，请在文本中保留不确定性。",
+                )
+            )
+    for misbelief in _as_strings(cognitive.get("misbeliefs")):
+        if _mentions_key_terms(content, misbelief) and not _has_transition_marker(content):
+            issues.append(
+                _review_issue(
+                    "evolution_character_belief",
+                    "suggestion",
+                    f"{name} 仍有未修正误信：{misbelief}，本章相关表述需要交代误信是否被打破。",
+                    chapter_number,
+                    "写出证据、挫败或他人的告知，让认知变化成为剧情事件，而不是静默切换。",
+                )
+            )
+    for limit in _as_strings(card.get("capability_limits")):
+        if _mentions_key_terms(content, limit) and _has_mastery_marker(content) and not _has_transition_marker(content):
+            issues.append(
+                _review_issue(
+                    "evolution_character_capability",
+                    "warning",
+                    f"{name} 的能力边界是：{limit}，但本章呈现为直接突破或熟练解决。",
+                    chapter_number,
+                    "增加试错、代价、外部帮助或失败风险；避免把能力边界写成突然全知全能。",
+                )
+            )
+    if _has_all_knowing_marker(content) and (_as_strings(cognitive.get("unknowns")) or _as_strings(card.get("capability_limits"))):
+        issues.append(
+            _review_issue(
+                "evolution_character_logic",
+                "suggestion",
+                f"{name} 本章语气接近全知判断，但人物卡仍存在未知或能力边界。",
+                chapter_number,
+                "将确定判断改为观察、推断、误判或带代价的验证，让角色认知随证据成长。",
+            )
+        )
+    return issues
+
+
+def _review_issue(issue_type: str, severity: str, description: str, chapter_number: int, suggestion: str) -> dict[str, Any]:
+    return {
+        "issue_type": issue_type,
+        "severity": severity,
+        "description": description,
+        "location": f"Chapter {chapter_number}",
+        "suggestion": suggestion,
+    }
+
+
+def _recent_fact_characters(facts: list[dict[str, Any]], *, limit: int) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for fact in reversed(facts[-limit:]):
+        for name in fact.get("characters") or []:
+            value = str(name or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                names.append(value)
+    return names
+
+
+def _as_strings(items: Any) -> list[str]:
+    return [str(item or "").strip() for item in (items or []) if str(item or "").strip()]
+
+
+def _mentions_key_terms(content: str, phrase: str) -> bool:
+    terms = [term for term in _split_terms(phrase) if len(term) >= 2]
+    terms.extend(_semantic_terms(phrase))
+    terms = list(dict.fromkeys(terms))
+    if not terms:
+        return phrase in content
+    if any(len(term) >= 4 and term in content for term in terms):
+        return True
+    matches = sum(1 for term in terms if term in content)
+    return matches >= min(2, len(terms))
+
+
+def _semantic_terms(phrase: str) -> list[str]:
+    cleaned = phrase
+    for marker in ("不能", "无法", "不会", "不知", "不知道", "凭空", "直接", "轻易", "所有"):
+        cleaned = cleaned.replace(marker, "")
+    return [cleaned[index : index + 4] for index in range(0, max(len(cleaned) - 3, 0)) if cleaned[index : index + 4].strip()]
+
+
+def _looks_resolved_without_transition(content: str, unknown: str) -> bool:
+    return _mentions_key_terms(content, unknown) and _has_knowledge_marker(content) and not _has_transition_marker(content)
+
+
+def _split_terms(text: str) -> list[str]:
+    separators = "，。；、：:（）()【】[]《》 \n\t"
+    current = text
+    for sep in separators:
+        current = current.replace(sep, "|")
+    terms = []
+    for part in current.split("|"):
+        part = part.strip()
+        if not part:
+            continue
+        if len(part) > 8:
+            terms.extend(part[index : index + 4] for index in range(0, len(part), 4))
+        else:
+            terms.append(part)
+    return terms
+
+
+def _has_knowledge_marker(content: str) -> bool:
+    markers = ["知道", "明白", "清楚", "意识到", "看穿", "断定", "确定", "早就", "原来"]
+    return any(marker in content for marker in markers)
+
+
+def _has_mastery_marker(content: str) -> bool:
+    markers = ["轻易", "立刻", "毫不费力", "随手", "直接", "精准", "完全", "熟练", "一眼", "看穿"]
+    return any(marker in content for marker in markers)
+
+
+def _has_all_knowing_marker(content: str) -> bool:
+    markers = ["一切都在", "早已算到", "全都知道", "早就知道", "毫无疑问", "不用验证"]
+    return any(marker in content for marker in markers)
+
+
+def _has_transition_marker(content: str) -> bool:
+    markers = [
+        "发现",
+        "意识到",
+        "终于明白",
+        "从",
+        "得知",
+        "听见",
+        "看见",
+        "试探",
+        "验证",
+        "推断",
+        "猜测",
+        "误以为",
+        "代价",
+        "失败",
+        "受伤",
+        "请教",
+        "提醒",
+        "线索",
+        "证据",
+    ]
+    return any(marker in content for marker in markers)
 
 def _extract_content(payload: dict[str, Any]) -> str:
     nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}

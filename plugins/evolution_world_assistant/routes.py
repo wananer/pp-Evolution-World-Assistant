@@ -18,7 +18,7 @@ async def get_status():
         "version": "0.1.0",
         "status": "installed",
         "phase": "structured-extraction-phase-2",
-        "capabilities": ["after_commit", "before_context_build", "character_cards", "manual_rebuild", "structured_extraction", "deterministic_fallback", "rollback", "st_preset_import"],
+        "capabilities": ["after_commit", "before_context_build", "character_cards", "manual_rebuild", "structured_extraction", "deterministic_fallback", "rollback", "st_preset_import", "chapter_review"],
     }
 
 
@@ -66,6 +66,22 @@ async def list_snapshots(novel_id: str):
 @router.get("/novels/{novel_id}/events")
 async def list_events(novel_id: str):
     return _service.list_events(novel_id)
+
+
+@router.post("/novels/{novel_id}/chapters/{chapter_number}/review")
+async def review_chapter(novel_id: str, chapter_number: int, payload: Optional[dict] = None):
+    body = payload or {}
+    content = str(body.get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required for review")
+    return _service.review_chapter(
+        {
+            "novel_id": novel_id,
+            "chapter_number": chapter_number,
+            "trigger_type": "manual",
+            "payload": {"content": content},
+        }
+    )
 
 
 @router.post("/novels/{novel_id}/chapters/{chapter_number}/rollback")

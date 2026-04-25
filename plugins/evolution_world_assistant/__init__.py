@@ -13,6 +13,7 @@ def init_api(app) -> None:
     register_hook("evolution_world_assistant", "before_context_build", service.before_context_build)
     register_hook("evolution_world_assistant", "manual_rebuild", service.manual_rebuild)
     register_hook("evolution_world_assistant", "rollback", service.rollback)
+    register_hook("evolution_world_assistant", "review_chapter", service.review_chapter)
 
     prefix = "/api/v1/plugins/evolution-world"
     if not any(getattr(route, "path", "").startswith(prefix) for route in app.routes):

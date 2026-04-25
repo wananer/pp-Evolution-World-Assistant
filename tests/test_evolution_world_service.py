@@ -362,3 +362,84 @@ async def test_rich_character_card_tracks_cognition_growth_and_limits(tmp_path):
     assert "从逞强独闯转向承认自己需要验证线索" in content
     for locked_phrase in ["必须写", "必写", "必须展开", "固定发展路线"]:
         assert locked_phrase not in content
+
+
+def test_review_chapter_flags_cognition_and_capability_without_transition(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.write_character_cards(
+        "novel-review-1",
+        [
+            {
+                "character_id": "lin-che",
+                "name": "林澈",
+                "first_seen_chapter": 1,
+                "last_seen_chapter": 1,
+                "aliases": [],
+                "recent_events": [],
+                "status": "active",
+                "cognitive_state": {
+                    "known_facts": ["黑色钥匙能响应黑塔密门"],
+                    "unknowns": ["不知道钥匙会消耗记忆"],
+                    "misbeliefs": ["误以为钥匙可以打开所有门"],
+                },
+                "emotional_arc": [],
+                "growth_arc": {"stage": "谨慎试探", "changes": []},
+                "capability_limits": ["不能凭空知道黑塔机关"],
+                "decision_biases": [],
+            }
+        ],
+    )
+
+    result = service.review_chapter(
+        {
+            "novel_id": "novel-review-1",
+            "chapter_number": 2,
+            "payload": {"content": "林澈知道钥匙会消耗记忆，并且一眼看穿黑塔机关，直接打开所有门。"},
+        }
+    )
+
+    issue_types = {item["issue_type"] for item in result["data"]["issues"]}
+    assert "evolution_character_cognition" in issue_types
+    assert "evolution_character_capability" in issue_types
+    assert result["data"]["suggestions"]
+
+
+def test_review_chapter_allows_explained_cognition_transition(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.write_character_cards(
+        "novel-review-2",
+        [
+            {
+                "character_id": "lin-che",
+                "name": "林澈",
+                "first_seen_chapter": 1,
+                "last_seen_chapter": 1,
+                "aliases": [],
+                "recent_events": [],
+                "status": "active",
+                "cognitive_state": {
+                    "known_facts": [],
+                    "unknowns": ["不知道钥匙会消耗记忆"],
+                    "misbeliefs": [],
+                },
+                "emotional_arc": [],
+                "growth_arc": {"stage": "谨慎试探", "changes": []},
+                "capability_limits": ["不能凭空知道黑塔机关"],
+                "decision_biases": [],
+            }
+        ],
+    )
+
+    result = service.review_chapter(
+        {
+            "novel_id": "novel-review-2",
+            "chapter_number": 2,
+            "payload": {"content": "林澈从顾衡留下的线索得知钥匙会消耗记忆，于是先试探机关，没有直接断定答案。"},
+        }
+    )
+
+    issue_types = {item["issue_type"] for item in result["data"]["issues"]}
+    assert "evolution_character_cognition" not in issue_types
+    assert "evolution_character_capability" not in issue_types
