@@ -46,9 +46,10 @@ class EvolutionWorldRepository:
             items.append(data)
         return items
 
-    def upsert_character_cards(self, novel_id: str, snapshot: ChapterFactSnapshot) -> list[dict[str, Any]]:
+    def upsert_character_cards(self, novel_id: str, snapshot: ChapterFactSnapshot, character_updates: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
         cards = self.list_character_cards(novel_id)["items"]
-        by_name = {card.get("name"): card for card in cards}
+        by_name = {card.get("name"): _ensure_character_defaults(card) for card in cards}
+        updates_by_name = {item.get("name"): item for item in (character_updates or []) if item.get("name")}
         updated = []
         for name in snapshot.characters:
             current = by_name.get(name) or CharacterCard(
@@ -57,8 +58,11 @@ class EvolutionWorldRepository:
                 first_seen_chapter=snapshot.chapter_number,
                 last_seen_chapter=snapshot.chapter_number,
             ).to_dict()
+            current = _ensure_character_defaults(current)
             current["last_seen_chapter"] = max(int(current.get("last_seen_chapter") or 0), snapshot.chapter_number)
             current.setdefault("recent_events", [])
+            update = updates_by_name.get(name) or {}
+            _merge_character_life_state(current, update, snapshot.chapter_number)
             event_summary = _character_event_summary(name, snapshot)
             if event_summary:
                 current["recent_events"].append(
@@ -66,6 +70,8 @@ class EvolutionWorldRepository:
                         "chapter_number": snapshot.chapter_number,
                         "summary": event_summary,
                         "locations": snapshot.locations[:5],
+                        "inner_change": update.get("inner_change") or "",
+                        "knowledge_delta": update.get("knowledge_delta") or "",
                     }
                 )
                 current["recent_events"] = current["recent_events"][-8:]
@@ -180,6 +186,50 @@ class EvolutionWorldRepository:
             return False
         path.unlink()
         return True
+
+
+def _ensure_character_defaults(card: dict[str, Any]) -> dict[str, Any]:
+    card.setdefault("cognitive_state", {"known_facts": [], "unknowns": [], "misbeliefs": []})
+    card.setdefault("emotional_arc", [])
+    card.setdefault("growth_arc", {"stage": "未定", "changes": []})
+    card.setdefault("capability_limits", [])
+    card.setdefault("decision_biases", [])
+    return card
+
+
+def _merge_character_life_state(card: dict[str, Any], update: dict[str, Any], chapter_number: int) -> None:
+    cognitive = card.setdefault("cognitive_state", {"known_facts": [], "unknowns": [], "misbeliefs": []})
+    for key in ("known_facts", "unknowns", "misbeliefs"):
+        cognitive[key] = _merge_limited_strings(cognitive.get(key) or [], update.get(key) or [], limit=10)
+    if update.get("inner_change") or update.get("emotion"):
+        card.setdefault("emotional_arc", []).append(
+            {
+                "chapter_number": chapter_number,
+                "emotion": str(update.get("emotion") or "").strip(),
+                "inner_change": str(update.get("inner_change") or "").strip(),
+            }
+        )
+        card["emotional_arc"] = card["emotional_arc"][-8:]
+    growth = card.setdefault("growth_arc", {"stage": "未定", "changes": []})
+    if update.get("growth_stage"):
+        growth["stage"] = str(update.get("growth_stage"))[:80]
+    if update.get("growth_change"):
+        growth.setdefault("changes", []).append({"chapter_number": chapter_number, "summary": str(update.get("growth_change"))[:160]})
+        growth["changes"] = growth["changes"][-8:]
+    card["capability_limits"] = _merge_limited_strings(card.get("capability_limits") or [], update.get("capability_limits") or [], limit=10)
+    card["decision_biases"] = _merge_limited_strings(card.get("decision_biases") or [], update.get("decision_biases") or [], limit=8)
+
+
+def _merge_limited_strings(existing: list[Any], incoming: list[Any], *, limit: int) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in [*existing, *incoming]:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value[:160])
+    return result[-limit:]
 
 
 def _snapshot_from_dict(data: dict[str, Any]) -> ChapterFactSnapshot:

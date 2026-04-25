@@ -64,7 +64,11 @@ class EvolutionWorldAssistantService:
                 snapshot.characters.append(name)
         previous_snapshot = self.repository.get_fact_snapshot(novel_id, chapter_number)
         self.repository.save_fact_snapshot(snapshot)
-        updated_cards = self.repository.upsert_character_cards(novel_id, snapshot)
+        updated_cards = self.repository.upsert_character_cards(
+            novel_id,
+            snapshot,
+            [item.to_dict() for item in extraction.character_updates],
+        )
         finished_at = _now()
         duration_ms = int((perf_counter() - start_time) * 1000)
         self.repository.append_event(

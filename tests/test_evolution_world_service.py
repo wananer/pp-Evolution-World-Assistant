@@ -291,3 +291,67 @@ async def test_context_patch_separates_background_constraints_from_focus(tmp_pat
     assert "只作为连续性约束" in background["content"]
     assert "不要因此强制安排出场" in background["content"]
     assert "《沈月》" not in background["content"]
+
+
+
+class RichStructuredProvider:
+    async def extract(self, request):
+        return {
+            "summary": "林澈第一次意识到黑色钥匙并不能直接解决所有问题。",
+            "characters": [
+                {
+                    "name": "林澈",
+                    "summary": "林澈试图用黑色钥匙开门，但发现自己并不了解机关规则。",
+                    "locations": ["黑塔"],
+                    "known_facts": ["黑色钥匙能响应黑塔密门", "顾衡曾提醒钥匙有代价"],
+                    "unknowns": ["不知道密门后的守卫是谁", "不知道钥匙会消耗记忆"],
+                    "misbeliefs": ["误以为钥匙可以打开所有门"],
+                    "emotion": "谨慎中夹着急迫",
+                    "inner_change": "从逞强独闯转向承认自己需要验证线索",
+                    "growth_stage": "从冲动试探走向谨慎推理",
+                    "growth_change": "开始用证据校正自信",
+                    "capability_limits": ["不能凭空知道黑塔机关", "钥匙只能打开响应过的密门"],
+                    "decision_biases": ["遇到同伴受威胁时会冒险", "倾向先保护钥匙秘密"],
+                }
+            ],
+            "locations": ["黑塔"],
+            "world_events": [],
+        }
+
+
+@pytest.mark.asyncio
+async def test_rich_character_card_tracks_cognition_growth_and_limits(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=RichStructuredProvider(),
+    )
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-10",
+            "chapter_number": 1,
+            "payload": {"content": "《林澈》把黑色钥匙插进黑塔密门，却发现机关没有立刻打开。"},
+        }
+    )
+
+    card = service.get_character("novel-10", "林澈")
+    assert "黑色钥匙能响应黑塔密门" in card["cognitive_state"]["known_facts"]
+    assert "不知道钥匙会消耗记忆" in card["cognitive_state"]["unknowns"]
+    assert "误以为钥匙可以打开所有门" in card["cognitive_state"]["misbeliefs"]
+    assert card["growth_arc"]["stage"] == "从冲动试探走向谨慎推理"
+    assert "不能凭空知道黑塔机关" in card["capability_limits"]
+
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-10",
+            "chapter_number": 2,
+            "payload": {"outline": "林澈继续调查黑塔密门。"},
+        }
+    )
+    content = context["context_blocks"][0]["content"]
+    assert "认知已知" in content
+    assert "认知盲区" in content
+    assert "能力边界" in content
+    assert "从逞强独闯转向承认自己需要验证线索" in content

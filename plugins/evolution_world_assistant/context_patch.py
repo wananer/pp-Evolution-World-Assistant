@@ -167,11 +167,53 @@ def _render_focus_characters(characters: list[dict[str, Any]]) -> str:
         summary = _clean_display_text(latest.get("summary") or "暂无近期动态")
         reasons = "、".join((card.get("injection_relevance") or {}).get("reasons") or [])
         reason_suffix = f"；相关性：{reasons}" if reasons else ""
+        life_parts = _render_life_parts(card)
+        life_suffix = f"；{life_parts}" if life_parts else ""
         lines.append(
-            f"- {card.get('name')}：状态 {card.get('status') or 'active'}；首次第{card.get('first_seen_chapter')}章，最近第{card.get('last_seen_chapter')}章；{summary}{reason_suffix}"
+            f"- {card.get('name')}：状态 {card.get('status') or 'active'}；首次第{card.get('first_seen_chapter')}章，最近第{card.get('last_seen_chapter')}章；{summary}{life_suffix}{reason_suffix}"
         )
     return "\n".join(lines)
 
+
+
+def _render_life_parts(card: dict[str, Any]) -> str:
+    parts: list[str] = []
+    cognitive = card.get("cognitive_state") or {}
+    known = _join_limited(cognitive.get("known_facts"), 2)
+    unknowns = _join_limited(cognitive.get("unknowns"), 2)
+    misbeliefs = _join_limited(cognitive.get("misbeliefs"), 1)
+    if known:
+        parts.append(f"认知已知：{known}")
+    if unknowns:
+        parts.append(f"认知盲区：{unknowns}")
+    if misbeliefs:
+        parts.append(f"误判/偏见：{misbeliefs}")
+    emotional = (card.get("emotional_arc") or [])[-1:]
+    if emotional:
+        item = emotional[0]
+        emotion = item.get("emotion") or ""
+        change = item.get("inner_change") or ""
+        if emotion or change:
+            parts.append(f"心路：{_clean_display_text(emotion)}{'，' if emotion and change else ''}{_clean_display_text(change)}")
+    growth = card.get("growth_arc") or {}
+    if growth.get("stage") and growth.get("stage") != "未定":
+        parts.append(f"成长阶段：{_clean_display_text(growth.get('stage'))}")
+    latest_growth = (growth.get("changes") or [])[-1:]
+    if latest_growth:
+        parts.append(f"成长变化：{_clean_display_text(latest_growth[0].get('summary'))}")
+    limits = _join_limited(card.get("capability_limits"), 2)
+    if limits:
+        parts.append(f"能力边界：{limits}")
+    biases = _join_limited(card.get("decision_biases"), 2)
+    if biases:
+        parts.append(f"决策倾向：{biases}")
+    return "；".join(part for part in parts if part)
+
+
+def _join_limited(values: Any, limit: int) -> str:
+    if not isinstance(values, list):
+        return ""
+    return "、".join(_clean_display_text(str(item)) for item in values[-limit:] if str(item).strip())
 
 def _render_background_constraints(characters: list[dict[str, Any]]) -> str:
     lines = []
