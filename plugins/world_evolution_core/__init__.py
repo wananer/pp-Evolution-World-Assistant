@@ -10,6 +10,8 @@ def init_api(app) -> None:
 
     service = EvolutionWorldAssistantService()
     register_hook("world_evolution_core", "after_commit", service.after_commit)
+    register_hook("world_evolution_core", "after_chapter_review", service.after_chapter_review)
+    register_hook("world_evolution_core", "before_chapter_review", service.before_chapter_review)
     register_hook("world_evolution_core", "before_context_build", service.before_context_build)
     register_hook("world_evolution_core", "manual_rebuild", service.manual_rebuild)
     register_hook("world_evolution_core", "rollback", service.rollback)

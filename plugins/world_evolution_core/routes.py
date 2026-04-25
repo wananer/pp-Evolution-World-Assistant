@@ -18,7 +18,21 @@ async def get_status():
         "version": "0.1.0",
         "status": "installed",
         "phase": "structured-extraction-phase-2",
-        "capabilities": ["after_commit", "before_context_build", "character_cards", "manual_rebuild", "structured_extraction", "deterministic_fallback", "rollback", "st_preset_import", "chapter_review"],
+        "capabilities": [
+            "after_commit",
+            "before_context_build",
+            "before_chapter_review",
+            "after_chapter_review",
+            "character_cards",
+            "manual_rebuild",
+            "structured_extraction",
+            "deterministic_fallback",
+            "rollback",
+            "st_preset_import",
+            "chapter_review",
+            "timeline_events",
+            "continuity_constraints",
+        ],
     }
 
 
@@ -66,6 +80,21 @@ async def list_snapshots(novel_id: str):
 @router.get("/novels/{novel_id}/events")
 async def list_events(novel_id: str):
     return _service.list_events(novel_id)
+
+
+@router.get("/novels/{novel_id}/timeline/events")
+async def list_timeline_events(novel_id: str, before_chapter: Optional[int] = None, limit: int = 50):
+    return _service.list_timeline_events(novel_id, before_chapter=before_chapter, limit=limit)
+
+
+@router.get("/novels/{novel_id}/timeline/constraints")
+async def list_continuity_constraints(novel_id: str, limit: int = 80):
+    return _service.list_continuity_constraints(novel_id, limit=limit)
+
+
+@router.get("/novels/{novel_id}/timeline/review-records")
+async def list_review_records(novel_id: str, limit: int = 30):
+    return _service.list_review_records(novel_id, limit=limit)
 
 
 @router.post("/novels/{novel_id}/chapters/{chapter_number}/review")

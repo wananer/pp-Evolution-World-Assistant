@@ -602,3 +602,54 @@ def test_review_chapter_allows_explained_cognition_transition(tmp_path):
     issue_types = {item["issue_type"] for item in result["data"]["issues"]}
     assert "evolution_character_cognition" not in issue_types
     assert "evolution_character_capability" not in issue_types
+
+
+@pytest.mark.asyncio
+async def test_evolution_builds_timeline_evidence_for_review_flow(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-review-flow",
+            "chapter_number": 1,
+            "payload": {"content": "《林澈》进入黑塔，发现黑色钥匙。"},
+        }
+    )
+
+    events = service.list_timeline_events("novel-review-flow")["items"]
+    constraints = service.list_continuity_constraints("novel-review-flow")["items"]
+    before_review = service.before_chapter_review(
+        {
+            "novel_id": "novel-review-flow",
+            "chapter_number": 2,
+            "payload": {"content": "林澈知道其他角色未在场经历，并且一眼看穿黑塔机关。"},
+        }
+    )
+    review = service.review_chapter(
+        {
+            "novel_id": "novel-review-flow",
+            "chapter_number": 2,
+            "payload": {"content": "林澈知道其他角色未在场经历，并且一眼看穿黑塔机关。"},
+        }
+    )
+    after_review = service.after_chapter_review(
+        {
+            "novel_id": "novel-review-flow",
+            "chapter_number": 2,
+            "source": "chapter_review_service",
+            "payload": {"review_result": review["data"]},
+        }
+    )
+
+    assert events and events[0]["event_id"].startswith("evt_")
+    assert {item["type"] for item in constraints} & {"knowledge_boundary", "capability_boundary", "personality_boundary"}
+    assert [block["title"] for block in before_review["data"]["review_context_blocks"]][:2] == [
+        "Evolution 时间线证据",
+        "Evolution 连续性约束",
+    ]
+    assert review["data"]["evidence"]
+    assert any(issue.get("evidence") for issue in review["data"]["issues"])
+    assert after_review["data"]["recorded"] is True
+    records = service.list_review_records("novel-review-flow")["items"]
+    assert records[-1]["issue_count"] == len(review["data"]["issues"])

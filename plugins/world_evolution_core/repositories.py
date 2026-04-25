@@ -215,6 +215,90 @@ class EvolutionWorldRepository:
     def list_events(self, novel_id: str) -> list[dict[str, Any]]:
         return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "events.jsonl"])
 
+    def save_timeline_events(self, novel_id: str, events: list[dict[str, Any]]) -> None:
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_id = _safe_record_id(str(event.get("event_id") or _slug(str(event.get("summary") or "event"))))
+            chapter_number = _int_or_none(event.get("chapter_number"))
+            if not chapter_number:
+                continue
+            self.storage.write_json(
+                PLUGIN_NAME,
+                ["novels", novel_id, "timeline", "events", f"chapter_{chapter_number}", f"{event_id}.json"],
+                event,
+            )
+
+    def list_timeline_events(
+        self,
+        novel_id: str,
+        before_chapter: Optional[int] = None,
+        *,
+        limit: int = 24,
+    ) -> list[dict[str, Any]]:
+        rows = self.storage.list_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "timeline", "events"],
+            limit=limit if limit > 0 else None,
+            reverse=True,
+            before_chapter=before_chapter,
+        )
+        items = [item for item in rows if isinstance(item, dict)]
+        items.sort(key=lambda item: (int(item.get("chapter_number") or 0), int(item.get("scene_order") or 0), str(item.get("event_id") or "")))
+        return items
+
+    def save_continuity_constraints(self, novel_id: str, constraints: list[dict[str, Any]]) -> None:
+        for constraint in constraints:
+            if not isinstance(constraint, dict):
+                continue
+            constraint_id = _safe_record_id(str(constraint.get("constraint_id") or _slug(str(constraint.get("rule") or "constraint"))))
+            self.storage.write_json(
+                PLUGIN_NAME,
+                ["novels", novel_id, "timeline", "constraints", f"{constraint_id}.json"],
+                constraint,
+            )
+
+    def list_continuity_constraints(self, novel_id: str, limit: int = 80) -> list[dict[str, Any]]:
+        rows = self.storage.list_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "timeline", "constraints"],
+            limit=limit if limit > 0 else None,
+            reverse=True,
+        )
+        items = [item for item in rows if isinstance(item, dict)]
+        items.sort(key=lambda item: (str(item.get("subject") or ""), str(item.get("type") or ""), str(item.get("constraint_id") or "")))
+        return items
+
+    def append_review_record(self, novel_id: str, record: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "timeline", "review_records.jsonl"], record)
+
+    def list_review_records(self, novel_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "timeline", "review_records.jsonl"], limit=limit)
+
+    def build_review_evidence(
+        self,
+        novel_id: str,
+        content: str = "",
+        *,
+        before_chapter: Optional[int] = None,
+        limit: int = 12,
+    ) -> dict[str, list[dict[str, Any]]]:
+        text = str(content or "")
+        cards = self.list_relevant_character_cards(novel_id, text, limit=RECENT_CONTEXT_CHARACTER_LIMIT).get("items", [])
+        events = self.list_timeline_events(novel_id, before_chapter=before_chapter, limit=max(limit * 5, 24))
+        constraints = self.list_continuity_constraints(novel_id, limit=max(limit * 5, 24))
+        if text:
+            relevant_events = [event for event in events if _record_mentions(event, text)]
+            relevant_constraints = [constraint for constraint in constraints if _record_mentions(constraint, text)]
+        else:
+            relevant_events = events
+            relevant_constraints = constraints
+        return {
+            "characters": cards[:limit],
+            "events": (relevant_events or events[-limit:])[-limit:],
+            "constraints": (relevant_constraints or constraints[:limit])[:limit],
+        }
+
 
     def save_imported_flows(self, novel_id: str, converted: dict[str, Any]) -> None:
         self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "imported_flows.json"], converted)
@@ -511,3 +595,40 @@ def _character_event_summary(name: str, snapshot: ChapterFactSnapshot) -> str:
             end = min(len(snapshot.summary), marker + 120)
             return snapshot.summary[start:end]
     return f"第{snapshot.chapter_number}章出现，地点：{'、'.join(snapshot.locations[:3]) or '未标注'}"
+
+
+def _card_is_mentioned(card: dict[str, Any], text: str) -> bool:
+    names = [card.get("name"), *(card.get("aliases") or [])]
+    return any(str(name or "").strip() and str(name).strip() in text for name in names)
+
+
+def _record_mentions(record: dict[str, Any], text: str) -> bool:
+    if not text:
+        return True
+    terms: list[str] = []
+    for key in ("summary", "rule", "subject", "location", "type", "event_type"):
+        terms.extend(_split_match_terms(record.get(key)))
+    for key in ("participants", "locations", "evidence_events"):
+        for value in record.get(key) or []:
+            terms.extend(_split_match_terms(value))
+    terms = [term for term in dict.fromkeys(terms) if len(term) >= 2]
+    return any(term in text for term in terms)
+
+
+def _split_match_terms(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    separators = "，。；、：:（）()【】[]《》 \n\t"
+    normalized = text
+    for sep in separators:
+        normalized = normalized.replace(sep, "|")
+    terms: list[str] = []
+    for part in normalized.split("|"):
+        part = part.strip()
+        if not part:
+            continue
+        terms.append(part)
+        if len(part) > 8:
+            terms.extend(part[index : index + 4] for index in range(0, len(part) - 3))
+    return terms

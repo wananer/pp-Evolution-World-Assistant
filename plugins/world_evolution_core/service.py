@@ -69,6 +69,12 @@ class EvolutionWorldAssistantService:
             snapshot,
             [item.to_dict() for item in extraction.character_updates],
         )
+        timeline_events = _build_timeline_events(snapshot, extraction.to_dict(), content_hash, _now())
+        self.repository.save_timeline_events(novel_id, timeline_events)
+        self.repository.save_continuity_constraints(
+            novel_id,
+            _build_continuity_constraints(novel_id, updated_cards, snapshot.chapter_number, timeline_events),
+        )
         finished_at = _now()
         duration_ms = int((perf_counter() - start_time) * 1000)
         self.repository.append_event(
@@ -143,6 +149,27 @@ class EvolutionWorldAssistantService:
                     "metadata": {"novel_id": novel_id, "chapter_number": chapter_number, "patch_schema_version": patch.get("schema_version")},
                 }
             ],
+        }
+
+    def before_chapter_review(self, payload: dict[str, Any]) -> dict[str, Any]:
+        novel_id = str(payload.get("novel_id") or "").strip()
+        chapter_number = _int_or_none(payload.get("chapter_number"))
+        content = _extract_content(payload)
+        if not novel_id:
+            return {"ok": True, "skipped": True, "reason": "missing novel_id"}
+
+        evidence = self.repository.build_review_evidence(novel_id, content, before_chapter=chapter_number)
+        blocks = _build_review_context_blocks(evidence)
+        if not blocks:
+            return {"ok": True, "skipped": True, "reason": "no evolution review evidence yet"}
+        return {
+            "ok": True,
+            "data": {
+                "review_context_blocks": blocks,
+                "evidence": evidence.get("events", []),
+                "constraints": evidence.get("constraints", []),
+                "characters": evidence.get("characters", []),
+            },
         }
 
     async def manual_rebuild(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -243,6 +270,15 @@ class EvolutionWorldAssistantService:
     def list_events(self, novel_id: str) -> dict[str, Any]:
         return {"items": self.repository.list_events(novel_id)}
 
+    def list_timeline_events(self, novel_id: str, before_chapter: Optional[int] = None, limit: int = 50) -> dict[str, Any]:
+        return {"items": self.repository.list_timeline_events(novel_id, before_chapter=before_chapter, limit=limit)}
+
+    def list_continuity_constraints(self, novel_id: str, limit: int = 80) -> dict[str, Any]:
+        return {"items": self.repository.list_continuity_constraints(novel_id, limit=limit)}
+
+    def list_review_records(self, novel_id: str, limit: int = 30) -> dict[str, Any]:
+        return {"items": self.repository.list_review_records(novel_id, limit=limit)}
+
     def list_snapshots(self, novel_id: str) -> dict[str, Any]:
         return {"items": self.repository.list_fact_snapshots(novel_id)}
 
@@ -265,7 +301,8 @@ class EvolutionWorldAssistantService:
         if not novel_id or not chapter_number or not content:
             return {"ok": True, "skipped": True, "reason": "missing novel_id/chapter_number/content"}
 
-        cards = self.repository.list_relevant_character_cards(novel_id, content).get("items", [])
+        evidence = self.repository.build_review_evidence(novel_id, content, before_chapter=chapter_number)
+        cards = evidence.get("characters") or self.repository.list_relevant_character_cards(novel_id, content).get("items", [])
         facts = self.repository.list_fact_snapshots(
             novel_id,
             before_chapter=chapter_number,
@@ -276,19 +313,31 @@ class EvolutionWorldAssistantService:
 
         mentioned_cards = [card for card in cards if _character_is_mentioned(card, content)]
         for card in mentioned_cards:
-            issues.extend(_review_character_card_against_content(card, content, chapter_number))
+            issues.extend(
+                _attach_issue_evidence(
+                    _review_character_card_against_content(card, content, chapter_number),
+                    evidence,
+                    subject=str(card.get("name") or ""),
+                )
+            )
 
         recent_characters = _recent_fact_characters(facts, limit=3)
         mentioned_names = {str(card.get("name") or "") for card in mentioned_cards}
         offstage_mentions = [name for name in recent_characters if name and name in content and name not in mentioned_names]
         if offstage_mentions:
-            issues.append(
-                _review_issue(
-                    "evolution_plot_continuity",
-                    "suggestion",
-                    f"本章提到近期角色 {', '.join(offstage_mentions[:4])}，但未找到对应人物卡或别名匹配。",
-                    chapter_number,
-                    "如该角色实际出场，请先让章节提交/重建生成人物卡；如只是背景信息，避免写成已在场行动。",
+            issues.extend(
+                _attach_issue_evidence(
+                    [
+                        _review_issue(
+                            "evolution_plot_continuity",
+                            "suggestion",
+                            f"本章提到近期角色 {', '.join(offstage_mentions[:4])}，但未找到对应人物卡或别名匹配。",
+                            chapter_number,
+                            "如该角色实际出场，请先让章节提交/重建生成人物卡；如只是背景信息，避免写成已在场行动。",
+                        )
+                    ],
+                    evidence,
+                    subject=offstage_mentions[0],
                 )
             )
 
@@ -301,8 +350,29 @@ class EvolutionWorldAssistantService:
                 "issues": issues,
                 "suggestions": suggestions,
                 "reviewed_characters": [card.get("name") for card in mentioned_cards],
+                "evidence": evidence.get("events", []),
+                "constraints": evidence.get("constraints", []),
             },
         }
+
+    def after_chapter_review(self, payload: dict[str, Any]) -> dict[str, Any]:
+        novel_id = str(payload.get("novel_id") or "").strip()
+        chapter_number = _int_or_none(payload.get("chapter_number"))
+        review_result = (payload.get("payload") or {}).get("review_result") or {}
+        if not novel_id or not chapter_number:
+            return {"ok": True, "skipped": True, "reason": "missing novel_id/chapter_number"}
+        issues = review_result.get("issues") or []
+        self.repository.append_review_record(
+            novel_id,
+            {
+                "chapter_number": chapter_number,
+                "issue_count": len(issues) if isinstance(issues, list) else 0,
+                "overall_score": review_result.get("overall_score"),
+                "source": str(payload.get("source") or "chapter_review_service"),
+                "at": _now(),
+            },
+        )
+        return {"ok": True, "data": {"recorded": True, "chapter_number": chapter_number}}
 
     def build_context_patch(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> dict[str, Any]:
         facts = self.repository.list_fact_snapshots(
@@ -381,6 +451,163 @@ def _review_issue(issue_type: str, severity: str, description: str, chapter_numb
         "location": f"Chapter {chapter_number}",
         "suggestion": suggestion,
     }
+
+
+def _build_timeline_events(snapshot, extraction: dict[str, Any], content_hash: str, at: str) -> list[dict[str, Any]]:
+    raw_events = extraction.get("world_events") or []
+    if not raw_events:
+        raw_events = [{"summary": item, "characters": snapshot.characters, "locations": snapshot.locations[:5]} for item in snapshot.world_events]
+    events: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_events, start=1):
+        if not isinstance(raw, dict):
+            raw = {"summary": str(raw)}
+        summary = str(raw.get("summary") or "").strip()
+        if not summary:
+            continue
+        participants = [str(item) for item in (raw.get("characters") or snapshot.characters) if str(item).strip()]
+        locations = [str(item) for item in (raw.get("locations") or snapshot.locations[:5]) if str(item).strip()]
+        event_type = str(raw.get("event_type") or "scene").strip() or "scene"
+        seed = f"{snapshot.novel_id}:{snapshot.chapter_number}:{index}:{summary}:{content_hash}"
+        events.append(
+            {
+                "event_id": "evt_" + _hash_text(seed)[:16],
+                "novel_id": snapshot.novel_id,
+                "chapter_number": snapshot.chapter_number,
+                "scene_order": index,
+                "event_type": event_type,
+                "summary": summary[:240],
+                "participants": participants[:12],
+                "location": locations[0] if locations else "",
+                "locations": locations[:5],
+                "effects": _event_effects_from_raw(raw),
+                "knowledge_delta": _knowledge_delta_from_raw(raw, participants),
+                "source": extraction.get("source") or "deterministic",
+                "content_hash": content_hash,
+                "confidence": float(raw.get("confidence") or 0.7),
+                "at": at,
+            }
+        )
+    return events
+
+
+def _event_effects_from_raw(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    effects: list[dict[str, Any]] = []
+    for field in ("emotion", "inner_change", "growth_stage", "growth_change"):
+        value = str(raw.get(field) or "").strip()
+        if value:
+            effects.append({"target_type": "character", "field": field, "value": value[:160]})
+    return effects[:8]
+
+
+def _knowledge_delta_from_raw(raw: dict[str, Any], participants: list[str]) -> list[dict[str, Any]]:
+    deltas: list[dict[str, Any]] = []
+    for fact in raw.get("known_facts") or []:
+        value = str(fact or "").strip()
+        if value:
+            for name in participants[:4] or ["__scene__"]:
+                deltas.append({"character": name, "learned": value[:160]})
+    return deltas[:12]
+
+
+def _build_continuity_constraints(novel_id: str, cards: list[dict[str, Any]], chapter_number: int, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    constraints: list[dict[str, Any]] = []
+    evidence_ids = [event.get("event_id") for event in events if event.get("event_id")]
+    for card in cards:
+        name = str(card.get("name") or "").strip()
+        if not name:
+            continue
+        for unknown in _as_strings((card.get("cognitive_state") or {}).get("unknowns"))[-3:]:
+            constraints.append(_constraint(novel_id, chapter_number, "knowledge_boundary", name, f"{name} 仍未知：{unknown}。", evidence_ids))
+        for limit in _as_strings(card.get("capability_limits"))[-3:]:
+            constraints.append(_constraint(novel_id, chapter_number, "capability_boundary", name, f"{name} 的能力边界：{limit}。", evidence_ids))
+        palette = card.get("personality_palette") if isinstance(card.get("personality_palette"), dict) else {}
+        base = str(palette.get("base") or "").strip()
+        main = "、".join(_as_strings(palette.get("main_tones"))[:3])
+        accents = "、".join(_as_strings(palette.get("accents"))[:2])
+        if base or main or accents:
+            rule = f"{name} 的性格调色盘：底色={base or '未定'}；主色调={main or '未定'}；点缀={accents or '无'}。行为转折需与调色盘衍生一致。"
+            constraints.append(_constraint(novel_id, chapter_number, "personality_boundary", name, rule, evidence_ids))
+    return constraints
+
+
+def _constraint(novel_id: str, chapter_number: int, constraint_type: str, subject: str, rule: str, evidence_ids: list[str]) -> dict[str, Any]:
+    seed = f"{novel_id}:{constraint_type}:{subject}:{rule}"
+    return {
+        "constraint_id": "cc_" + _hash_text(seed)[:16],
+        "novel_id": novel_id,
+        "chapter_number": chapter_number,
+        "type": constraint_type,
+        "subject": subject,
+        "rule": rule[:260],
+        "severity": "warning",
+        "evidence_events": evidence_ids[:8],
+        "created_or_updated_chapter": chapter_number,
+    }
+
+
+def _build_review_context_blocks(evidence: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    events = evidence.get("events") or []
+    constraints = evidence.get("constraints") or []
+    characters = evidence.get("characters") or []
+    if events:
+        blocks.append({"title": "Evolution 时间线证据", "kind": "timeline_evidence", "content": _render_review_events(events), "items": events})
+    if constraints:
+        blocks.append({"title": "Evolution 连续性约束", "kind": "continuity_constraints", "content": _render_review_constraints(constraints), "items": constraints})
+    if characters:
+        blocks.append({"title": "Evolution 人物状态投影", "kind": "character_state_projection", "content": _render_review_characters(characters), "items": characters})
+    return blocks
+
+
+def _render_review_events(events: list[dict[str, Any]]) -> str:
+    lines = []
+    for event in events[-8:]:
+        names = "、".join(str(item) for item in event.get("participants") or [])
+        who = f" 角色：{names}" if names else ""
+        location = f" 地点：{event.get('location')}" if event.get("location") else ""
+        lines.append(f"- 第{event.get('chapter_number')}章：{event.get('summary')}{who}{location}")
+    return "\n".join(lines)
+
+
+def _render_review_constraints(constraints: list[dict[str, Any]]) -> str:
+    return "\n".join(f"- [{item.get('type')}] {item.get('rule')}" for item in constraints[:10])
+
+
+def _render_review_characters(characters: list[dict[str, Any]]) -> str:
+    lines = []
+    for card in characters[:8]:
+        cognitive = card.get("cognitive_state") or {}
+        unknowns = "、".join(_as_strings(cognitive.get("unknowns"))[-2:])
+        limits = "、".join(_as_strings(card.get("capability_limits"))[-2:])
+        suffix = "；".join(item for item in [f"未知={unknowns}" if unknowns else "", f"能力边界={limits}" if limits else ""] if item)
+        lines.append(f"- {card.get('name')}：最近第{card.get('last_seen_chapter')}章；{suffix or '暂无硬性边界'}")
+    return "\n".join(lines)
+
+
+def _attach_issue_evidence(issues: list[dict[str, Any]], evidence: dict[str, list[dict[str, Any]]], *, subject: str) -> list[dict[str, Any]]:
+    subject = str(subject or "")
+    events = [
+        event
+        for event in evidence.get("events", [])
+        if not subject or subject in [str(item) for item in event.get("participants") or []] or subject in str(event.get("summary") or "")
+    ][:3]
+    constraints = [
+        constraint
+        for constraint in evidence.get("constraints", [])
+        if not subject or subject == str(constraint.get("subject") or "") or subject in str(constraint.get("rule") or "")
+    ][:3]
+    refs = [
+        {"event_id": item.get("event_id"), "chapter_number": item.get("chapter_number"), "summary": item.get("summary")}
+        for item in events
+    ]
+    refs.extend(
+        {"constraint_id": item.get("constraint_id"), "type": item.get("type"), "rule": item.get("rule")}
+        for item in constraints
+    )
+    for issue in issues:
+        if refs:
+            issue["evidence"] = refs
+    return issues
 
 
 def _recent_fact_characters(facts: list[dict[str, Any]], *, limit: int) -> list[str]:

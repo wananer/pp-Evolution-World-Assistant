@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from .context_bridge import dispatch_hook_sync, render_context_blocks
 from .hook_dispatcher import clear_hooks, dispatch_hook, dispatch_hook_sync_best_effort, list_hooks, register_hook
-from .host_integration import build_generation_context_patch, notify_chapter_committed, review_chapter_with_plugins
+from .host_integration import (
+    build_generation_context_patch,
+    collect_chapter_review_context_with_plugins,
+    notify_chapter_committed,
+    notify_chapter_review_completed,
+    review_chapter_with_plugins,
+)
 from .host_database import ReadOnlyHostDatabase, create_default_readonly_host_database
 from .host_facade import PlotPilotPluginHost
 from .job_registry import PluginJobRecord, PluginJobRegistry
@@ -20,6 +26,7 @@ __all__ = [
     "ReadOnlyHostDatabase",
     "build_generation_context_patch",
     "clear_hooks",
+    "collect_chapter_review_context_with_plugins",
     "create_default_readonly_host_database",
     "default_plugin_storage_root",
     "dispatch_hook",
@@ -28,6 +35,7 @@ __all__ = [
     "list_hooks",
     "register_hook",
     "notify_chapter_committed",
+    "notify_chapter_review_completed",
     "render_context_blocks",
     "review_chapter_with_plugins",
 ]

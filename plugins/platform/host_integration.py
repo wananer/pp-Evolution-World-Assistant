@@ -87,3 +87,56 @@ async def review_chapter_with_plugins(
     except Exception as exc:
         logger.warning("Plugin review_chapter failed novel=%s ch=%s: %s", novel_id, chapter_number, exc)
         return [{"plugin_name": "plugin_platform", "hook_name": "review_chapter", "ok": False, "error": str(exc)}]
+
+
+async def collect_chapter_review_context_with_plugins(
+    novel_id: str,
+    chapter_number: int,
+    content: str,
+    *,
+    source: str = "chapter_review_service",
+    review_targets: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Ask plugins for evidence and context before native chapter review prompts run."""
+    try:
+        return await dispatch_hook(
+            "before_chapter_review",
+            {
+                "novel_id": novel_id,
+                "chapter_number": chapter_number,
+                "trigger_type": source,
+                "source": source,
+                "payload": {
+                    "content": content,
+                    "review_targets": review_targets or ["character", "timeline", "storyline", "foreshadowing"],
+                },
+            },
+        )
+    except Exception as exc:
+        logger.warning("Plugin before_chapter_review failed novel=%s ch=%s: %s", novel_id, chapter_number, exc)
+        return [{"plugin_name": "plugin_platform", "hook_name": "before_chapter_review", "ok": False, "error": str(exc)}]
+
+
+async def notify_chapter_review_completed(
+    novel_id: str,
+    chapter_number: int,
+    content: str,
+    review_result: dict[str, Any],
+    *,
+    source: str = "chapter_review_service",
+) -> list[dict[str, Any]]:
+    """Notify plugins after the main review flow produces a report."""
+    try:
+        return await dispatch_hook(
+            "after_chapter_review",
+            {
+                "novel_id": novel_id,
+                "chapter_number": chapter_number,
+                "trigger_type": source,
+                "source": source,
+                "payload": {"content": content, "review_result": review_result},
+            },
+        )
+    except Exception as exc:
+        logger.warning("Plugin after_chapter_review failed novel=%s ch=%s: %s", novel_id, chapter_number, exc)
+        return [{"plugin_name": "plugin_platform", "hook_name": "after_chapter_review", "ok": False, "error": str(exc)}]

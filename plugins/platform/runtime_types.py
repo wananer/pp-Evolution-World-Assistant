@@ -11,6 +11,8 @@ PluginHookName = Literal[
     "manual_rebuild",
     "rollback",
     "review_chapter",
+    "before_chapter_review",
+    "after_chapter_review",
 ]
 
 
