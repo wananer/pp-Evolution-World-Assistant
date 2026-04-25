@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Optional, Union, Tuple
 
+from .host_database import ReadOnlyHostDatabase, create_default_readonly_host_database
 from .hook_dispatcher import dispatch_hook
 from .plugin_storage import PluginStorage
 from .runtime_types import PluginHookPayload, PluginHookResult
@@ -27,8 +28,10 @@ class PlotPilotPluginHost:
         chapter_lister: Optional[Union[Reader, AsyncReader]] = None,
         llm_caller: Optional[Union[Reader, AsyncReader]] = None,
         event_emitter: Optional[Union[Reader, AsyncReader]] = None,
+        host_database: Optional[ReadOnlyHostDatabase] = None,
     ) -> None:
         self.storage = storage or PluginStorage()
+        self.host_database = host_database or create_default_readonly_host_database()
         self._novel_reader = novel_reader
         self._chapter_reader = chapter_reader
         self._chapter_lister = chapter_lister
@@ -62,6 +65,16 @@ class PlotPilotPluginHost:
 
     async def dispatch_hook(self, hook_name: str, payload: Optional[PluginHookPayload] = None) -> list[PluginHookResult]:
         return await dispatch_hook(hook_name, payload or {})
+
+    def read_host_rows(self, sql: str, params: tuple[Any, ...] = (), *, limit: int | None = None) -> list[dict[str, Any]]:
+        if self.host_database is None:
+            raise RuntimeError("host_database is not configured")
+        return self.host_database.fetch_all(sql, params, limit=limit)
+
+    def read_host_row(self, sql: str, params: tuple[Any, ...] = ()) -> Optional[dict[str, Any]]:
+        if self.host_database is None:
+            raise RuntimeError("host_database is not configured")
+        return self.host_database.fetch_one(sql, params)
 
     def read_plugin_state(self, plugin_name: str, scope: Union[list[str], Tuple[str, ...]], default: Any = None) -> Any:
         return self.storage.read_json(plugin_name, scope, default=default)

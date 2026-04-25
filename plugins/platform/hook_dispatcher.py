@@ -56,6 +56,31 @@ async def dispatch_hook(hook_name: str, payload: Optional[PluginHookPayload] = N
     return results
 
 
+
+def dispatch_hook_sync_best_effort(hook_name: str, payload: Optional[PluginHookPayload] = None) -> list[PluginHookResult]:
+    """Run synchronously-completable hook handlers without awaiting.
+
+    This is for synchronous hot paths such as prompt context allocation. Handlers
+    that return awaitables are skipped here and should be used through
+    ``dispatch_hook`` from async call sites.
+    """
+    results: list[PluginHookResult] = []
+    for plugin_name, handler in list(_HOOKS.get(hook_name, [])):
+        hook_payload: PluginHookPayload = {**(payload or {}), "plugin_name": plugin_name}
+        try:
+            raw_result = handler(hook_payload)
+            if inspect.isawaitable(raw_result):
+                if hasattr(raw_result, "close"):
+                    raw_result.close()
+                logger.debug("Plugin hook skipped in sync best-effort path: %s.%s", plugin_name, hook_name)
+                continue
+            results.append(_normalize_result(plugin_name, hook_name, raw_result))
+        except Exception as exc:  # pragma: no cover - defensive logging path
+            logger.exception("Plugin hook failed in sync best-effort path: %s.%s", plugin_name, hook_name)
+            results.append({"plugin_name": plugin_name, "hook_name": hook_name, "ok": False, "error": str(exc)})
+    return results
+
+
 def _normalize_result(plugin_name: str, hook_name: str, raw_result: Any) -> PluginHookResult:
     if raw_result is None:
         return {"plugin_name": plugin_name, "hook_name": hook_name, "ok": True}

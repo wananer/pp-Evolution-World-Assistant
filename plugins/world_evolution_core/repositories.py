@@ -1,7 +1,6 @@
-"""Sidecar repositories for Evolution World plugin state."""
+"""Database-backed repositories for Evolution World plugin state."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Optional, Union, Tuple
 
 from plugins.platform.plugin_storage import PluginStorage
@@ -34,17 +33,15 @@ class EvolutionWorldRepository:
         return data if isinstance(data, dict) else None
 
     def list_fact_snapshots(self, novel_id: str, before_chapter: Optional[int] = None) -> list[dict[str, Any]]:
-        facts_root = self.storage.root / PLUGIN_NAME / "novels" / novel_id / "facts"
-        if not facts_root.exists():
-            return []
         items = []
-        for path in sorted(facts_root.glob("chapter_*.json"), key=_chapter_sort_key):
-            data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "facts", path.name], default={})
+        for data in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "facts"]):
+            if not isinstance(data, dict):
+                continue
             chapter_number = _int_or_none(data.get("chapter_number"))
             if before_chapter and chapter_number and chapter_number >= before_chapter:
                 continue
             items.append(data)
-        return items
+        return sorted(items, key=lambda item: int(item.get("chapter_number") or 0))
 
     def upsert_character_cards(self, novel_id: str, snapshot: ChapterFactSnapshot, character_updates: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
         cards = self.list_character_cards(novel_id)["items"]
@@ -132,22 +129,7 @@ class EvolutionWorldRepository:
         self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "events.jsonl"], event)
 
     def list_events(self, novel_id: str) -> list[dict[str, Any]]:
-        path = self.storage.root / PLUGIN_NAME / "novels" / novel_id / "events.jsonl"
-        if not path.exists():
-            return []
-        items: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                import json
-
-                item = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(item, dict):
-                items.append(item)
-        return items
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "events.jsonl"])
 
 
     def save_imported_flows(self, novel_id: str, converted: dict[str, Any]) -> None:
@@ -160,32 +142,13 @@ class EvolutionWorldRepository:
         self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "runs.jsonl"], run)
 
     def list_workflow_runs(self, novel_id: str, limit: int = 50) -> list[dict[str, Any]]:
-        path = self.storage.root / PLUGIN_NAME / "novels" / novel_id / "runs.jsonl"
-        if not path.exists():
-            return []
-        items: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                import json
-
-                item = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(item, dict):
-                items.append(item)
-        return items[-limit:]
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "runs.jsonl"], limit=limit)
 
     def _delete_scope(self, scope: list[str]) -> bool:
         try:
-            path = self.storage._path(PLUGIN_NAME, scope)
+            return self.storage.delete_json(PLUGIN_NAME, scope)
         except ValueError:
             return False
-        if not path.exists() or not path.is_file():
-            return False
-        path.unlink()
-        return True
 
 
 def _ensure_character_defaults(card: dict[str, Any]) -> dict[str, Any]:
@@ -395,10 +358,6 @@ def _snapshot_from_dict(data: dict[str, Any]) -> ChapterFactSnapshot:
         at=str(data.get("at") or ""),
         schema_version=int(data.get("schema_version") or 1),
     )
-
-
-def _chapter_sort_key(path: Path):
-    return _int_or_none(path.stem.replace("chapter_", "")) or 0
 
 
 def _int_or_none(value: Any) -> Optional[int]:
