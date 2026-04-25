@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-PLUGIN_NAME = "evolution_world_assistant"
+PLUGIN_NAME = "world_evolution_core"
 
 
 def build_context_patch(
@@ -234,6 +234,16 @@ def _render_life_parts(card: dict[str, Any]) -> str:
         parts.append("软倾向（可被情境改变）：" + "；".join(soft))
     if mutable:
         parts.append("可变状态（允许随新证据更新）：" + "；".join(mutable))
+    appearance = _render_appearance_brief(card.get("appearance"))
+    if appearance:
+        parts.append("外貌/出场识别：" + appearance)
+    attributes = _render_record_brief(card.get("attributes"), 3)
+    world_fields = _render_record_brief((card.get("world_profile") or {}).get("fields"), 3)
+    if attributes or world_fields:
+        parts.append("属性/世界观字段：" + "；".join(item for item in [attributes, world_fields] if item))
+    palette = _render_palette_brief(card.get("personality_palette"))
+    if palette:
+        parts.append("性格调色盘：" + palette)
     return "；".join(part for part in parts if part)
 
 
@@ -241,6 +251,61 @@ def _join_limited(values: Any, limit: int) -> str:
     if not isinstance(values, list):
         return ""
     return "、".join(_clean_display_text(str(item)) for item in values[-limit:] if str(item).strip())
+
+
+def _render_appearance_brief(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    items = []
+    summary = _clean_display_text(value.get("summary") or "")
+    if summary and "待从正文补充" not in summary:
+        items.append(summary)
+    outfit = _clean_display_text(value.get("current_outfit") or "")
+    if outfit:
+        items.append(f"当前装束={outfit}")
+    features = _join_limited(value.get("features"), 2)
+    if features:
+        items.append(f"特征={features}")
+    return "；".join(items[:3])
+
+
+def _render_record_brief(records: Any, limit: int) -> str:
+    if not isinstance(records, list):
+        return ""
+    parts = []
+    for item in records[:limit]:
+        if not isinstance(item, dict):
+            continue
+        name = _clean_display_text(item.get("name") or "")
+        value = _clean_display_text(item.get("value") or "")
+        if name and value:
+            parts.append(f"{name}={value}")
+    return "、".join(parts)
+
+
+def _render_palette_brief(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    parts = []
+    base = _clean_display_text(value.get("base") or "")
+    if base:
+        parts.append(f"底色={base}")
+    main = _join_limited(value.get("main_tones"), 3)
+    if main:
+        parts.append(f"主色调={main}")
+    accents = _join_limited(value.get("accents"), 2)
+    if accents:
+        parts.append(f"点缀={accents}")
+    derivatives = value.get("derivatives") if isinstance(value.get("derivatives"), list) else []
+    if derivatives:
+        descriptions = []
+        for item in derivatives[:2]:
+            if isinstance(item, dict) and item.get("description"):
+                prefix = _clean_display_text(item.get("tone") or item.get("title") or "衍生")
+                descriptions.append(f"{prefix}:{_clean_display_text(item.get('description'))}")
+        if descriptions:
+            parts.append("行为衍生=" + " / ".join(descriptions))
+    return "；".join(parts)
 
 def _render_background_constraints(characters: list[dict[str, Any]]) -> str:
     lines = []

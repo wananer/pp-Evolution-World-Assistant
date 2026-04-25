@@ -1,6 +1,6 @@
 import pytest
 
-from plugins.evolution_world_assistant.service import EvolutionWorldAssistantService
+from plugins.world_evolution_core.service import EvolutionWorldAssistantService
 from plugins.platform.job_registry import PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
@@ -20,7 +20,7 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
 
     assert result["ok"] is True
     facts = storage.read_json(
-        "evolution_world_assistant",
+        "world_evolution_core",
         ["novels", "novel-1", "facts", "chapter_1.json"],
     )
     assert facts["chapter_number"] == 1
@@ -122,6 +122,63 @@ class FailingStructuredProvider:
         raise RuntimeError("provider offline")
 
 
+class PaletteStructuredProvider:
+    async def extract(self, request):
+        character_schema = request["schema"]["properties"]["characters"]["items"]["properties"]
+        assert "appearance" in character_schema
+        assert "attributes" in character_schema
+        assert "world_profile" in character_schema
+        assert "personality_palette" in character_schema
+        return {
+            "summary": "秋明月在夜色里用吉他solo，红美玲在台下看着她。",
+            "characters": [
+                {
+                    "name": "秋明月",
+                    "summary": "在街头舞台短暂恢复自我",
+                    "appearance": {
+                        "summary": "黑色短发，舞台上常穿宽松外套和磨旧靴子。",
+                        "features": ["黑色短发", "舞台眼线"],
+                        "style": ["随意舒适", "摇滚感"],
+                        "current_outfit": "宽松外套与磨旧靴子",
+                    },
+                    "attributes": [
+                        {"category": "基础", "name": "身份", "value": "贵族学校大小姐", "description": "校内需要维持优秀形象"},
+                        {"category": "音乐", "name": "擅长", "value": "吉他solo"},
+                    ],
+                    "world_profile": {
+                        "schema_name": "现代校园摇滚",
+                        "fields": [
+                            {"category": "学校", "name": "校内伪装", "value": "优秀的大小姐"},
+                            {"category": "关系", "name": "核心依赖", "value": "红美玲"},
+                        ],
+                    },
+                    "personality_palette": {
+                        "metaphor": "人的性格就像调色盘，叛逆是底色，热情与不拘一格是主色调。",
+                        "base": "叛逆",
+                        "main_tones": ["热情", "不拘一格"],
+                        "accents": ["依赖"],
+                        "derivatives": [
+                            {
+                                "tone": "热情",
+                                "title": "摇滚燃烧",
+                                "description": "创作、演唱和练习都会投入百分百热情。",
+                                "trigger": "面对摇滚",
+                            },
+                            {
+                                "tone": "依赖",
+                                "title": "崩溃时靠近",
+                                "description": "压力过大时会抓住红美玲的衣角寻求依靠。",
+                                "visibility": "只在两人或崩溃时显露",
+                            },
+                        ],
+                    },
+                }
+            ],
+            "locations": ["夜街", "舞台"],
+            "world_events": [{"summary": "秋明月在夜街舞台用吉他solo", "characters": ["秋明月"], "locations": ["夜街"]}],
+        }
+
+
 @pytest.mark.asyncio
 async def test_structured_provider_overrides_deterministic_extraction(tmp_path):
     storage = PluginStorage(root=tmp_path)
@@ -145,6 +202,42 @@ async def test_structured_provider_overrides_deterministic_extraction(tmp_path):
     assert result["data"]["facts"]["locations"] == ["雾城", "黑塔"]
     runs = service.list_runs("novel-4")
     assert runs["items"][-1]["output"]["extraction_source"] == "structured"
+
+
+@pytest.mark.asyncio
+async def test_structured_provider_persists_rich_character_profile(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=PaletteStructuredProvider(),
+    )
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-rich",
+            "chapter_number": 1,
+            "payload": {"content": "《秋明月》在夜街舞台用吉他solo，红美玲在台下看着她。"},
+        }
+    )
+
+    assert result["ok"] is True
+    card = service.get_character("novel-rich", "秋明月")
+    assert card is not None
+    assert card["appearance"]["summary"].startswith("黑色短发")
+    assert card["attributes"][0]["name"] == "身份"
+    assert card["world_profile"]["schema_name"] == "现代校园摇滚"
+    assert card["personality_palette"]["base"] == "叛逆"
+    assert card["personality_palette"]["main_tones"] == ["热情", "不拘一格"]
+    assert card["personality_palette"]["derivatives"][1]["tone"] == "依赖"
+
+    context = service.before_context_build(
+        {"novel_id": "novel-rich", "chapter_number": 2, "payload": {"outline": "秋明月结束演出后去找红美玲。"}}
+    )
+    content = context["context_blocks"][0]["content"]
+    assert "外貌/出场识别" in content
+    assert "性格调色盘" in content
+    assert "底色=叛逆" in content
 
 
 @pytest.mark.asyncio

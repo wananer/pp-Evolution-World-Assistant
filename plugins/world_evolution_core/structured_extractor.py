@@ -15,6 +15,10 @@ class StructuredCharacterUpdate:
     status: str = "active"
     aliases: list[str] = field(default_factory=list)
     locations: list[str] = field(default_factory=list)
+    appearance: dict[str, Any] = field(default_factory=dict)
+    attributes: list[dict[str, Any]] = field(default_factory=list)
+    world_profile: dict[str, Any] = field(default_factory=dict)
+    personality_palette: dict[str, Any] = field(default_factory=dict)
     known_facts: list[str] = field(default_factory=list)
     unknowns: list[str] = field(default_factory=list)
     misbeliefs: list[str] = field(default_factory=list)
@@ -90,6 +94,72 @@ STRUCTURED_EXTRACTION_SCHEMA: dict[str, Any] = {
                     "status": {"type": "string"},
                     "aliases": {"type": "array", "items": {"type": "string"}},
                     "locations": {"type": "array", "items": {"type": "string"}},
+                    "appearance": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {"type": "string"},
+                            "features": {"type": "array", "items": {"type": "string"}},
+                            "style": {"type": "array", "items": {"type": "string"}},
+                            "current_outfit": {"type": "string"},
+                            "marks": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                    "attributes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "value"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "value": {"type": "string"},
+                                "category": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                        },
+                    },
+                    "world_profile": {
+                        "type": "object",
+                        "properties": {
+                            "schema_name": {"type": "string"},
+                            "fields": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["name", "value"],
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "value": {"type": "string"},
+                                        "category": {"type": "string"},
+                                        "description": {"type": "string"},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    "personality_palette": {
+                        "type": "object",
+                        "properties": {
+                            "metaphor": {"type": "string"},
+                            "base": {"type": "string"},
+                            "main_tones": {"type": "array", "items": {"type": "string"}},
+                            "accents": {"type": "array", "items": {"type": "string"}},
+                            "derivatives": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["tone", "description"],
+                                    "properties": {
+                                        "tone": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "trigger": {"type": "string"},
+                                        "visibility": {"type": "string"},
+                                        "future": {"type": "boolean"},
+                                    },
+                                },
+                            },
+                        },
+                    },
                     "known_facts": {"type": "array", "items": {"type": "string"}},
                     "unknowns": {"type": "array", "items": {"type": "string"}},
                     "misbeliefs": {"type": "array", "items": {"type": "string"}},
@@ -148,7 +218,13 @@ async def extract_structured_chapter_facts(
         "chapter_number": chapter_number,
         "content": content,
         "schema": STRUCTURED_EXTRACTION_SCHEMA,
-        "instruction": "Extract only facts explicitly present in the chapter. Track each character's cognition, emotion, growth, and capability limits. Do not infer hidden motives, omniscient knowledge, or future events.",
+        "instruction": (
+            "Extract only facts explicitly present in the chapter. Track each character's appearance, open-ended attributes, "
+            "world-specific profile fields, cognition, emotion, growth, capability limits, and personality palette. "
+            "For personality_palette, model people as colors: base is the underlying color, main_tones are dominant colors, "
+            "accents are smaller visible traits, and derivatives explain concrete behavior patterns caused by each color. "
+            "Do not infer hidden motives, omniscient knowledge, or future events unless the text explicitly frames a future tendency."
+        ),
     }
     try:
         raw = await provider.extract(request)
@@ -167,6 +243,10 @@ def _fallback_result(novel_id: str, chapter_number: int, content_hash: str, cont
                 name=name,
                 summary=_summary_for_name(name, snapshot),
                 locations=snapshot.locations[:5],
+                appearance=_default_appearance(),
+                attributes=_default_attributes(),
+                world_profile=_default_world_profile(),
+                personality_palette=_default_personality_palette(),
                 known_facts=[_summary_for_name(name, snapshot)] if _summary_for_name(name, snapshot) else [],
                 unknowns=["未明确知道其他角色未在场经历"],
                 capability_limits=["只能依据已见、已听、已推理的信息行动"],
@@ -237,6 +317,10 @@ def _parse_character(value: Any) -> StructuredCharacterUpdate | None:
         status=str(value.get("status") or "active").strip()[:32] or "active",
         aliases=_strings(value.get("aliases"))[:8],
         locations=_strings(value.get("locations"))[:8],
+        appearance=_parse_appearance(value.get("appearance")),
+        attributes=_parse_records(value.get("attributes"))[:18],
+        world_profile=_parse_world_profile(value.get("world_profile")),
+        personality_palette=_parse_personality_palette(value.get("personality_palette")),
         known_facts=_strings(value.get("known_facts"))[:12],
         unknowns=_strings(value.get("unknowns"))[:12],
         misbeliefs=_strings(value.get("misbeliefs"))[:8],
@@ -281,6 +365,118 @@ def _strings(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return _dedupe(str(item).strip() for item in value if str(item).strip())
+
+
+def _parse_appearance(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "summary": str(value.get("summary") or "").strip()[:240],
+        "features": _strings(value.get("features"))[:10],
+        "style": _strings(value.get("style"))[:10],
+        "current_outfit": str(value.get("current_outfit") or "").strip()[:160],
+        "marks": _strings(value.get("marks"))[:10],
+    }
+
+
+def _parse_records(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        if isinstance(item, str):
+            name, _, raw_value = item.partition(":")
+            record = {"name": name.strip() or "属性", "value": raw_value.strip() or item.strip(), "category": "", "description": ""}
+        elif isinstance(item, dict):
+            record = {
+                "name": str(item.get("name") or "").strip()[:40],
+                "value": str(item.get("value") or "").strip()[:120],
+                "category": str(item.get("category") or "").strip()[:40],
+                "description": str(item.get("description") or "").strip()[:180],
+            }
+        else:
+            continue
+        if not record["name"] or not record["value"]:
+            continue
+        key = (record["category"], record["name"])
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(record)
+    return result
+
+
+def _parse_world_profile(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "schema_name": str(value.get("schema_name") or "").strip()[:80],
+        "fields": _parse_records(value.get("fields"))[:18],
+    }
+
+
+def _parse_personality_palette(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "metaphor": str(value.get("metaphor") or "").strip()[:240],
+        "base": str(value.get("base") or "").strip()[:40],
+        "main_tones": _strings(value.get("main_tones"))[:6],
+        "accents": _strings(value.get("accents"))[:8],
+        "derivatives": _parse_palette_derivatives(value.get("derivatives"))[:24],
+    }
+
+
+def _parse_palette_derivatives(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in value:
+        if isinstance(item, str):
+            record = {"tone": "", "title": "", "description": item.strip()[:260], "trigger": "", "visibility": "", "future": False}
+        elif isinstance(item, dict):
+            record = {
+                "tone": str(item.get("tone") or "").strip()[:40],
+                "title": str(item.get("title") or "").strip()[:60],
+                "description": str(item.get("description") or "").strip()[:300],
+                "trigger": str(item.get("trigger") or "").strip()[:120],
+                "visibility": str(item.get("visibility") or "").strip()[:120],
+                "future": bool(item.get("future")),
+            }
+        else:
+            continue
+        if not record["description"]:
+            continue
+        key = (record["tone"], record["title"], record["description"])
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(record)
+    return result
+
+
+def _default_appearance() -> dict[str, Any]:
+    return {"summary": "待从正文补充外貌描写", "features": [], "style": [], "current_outfit": "", "marks": []}
+
+
+def _default_attributes() -> list[dict[str, str]]:
+    return [{"name": "状态", "value": "active", "category": "基础", "description": "默认角色状态；可由具体世界观替换为修为、职业、阵营、能力值等。"}]
+
+
+def _default_world_profile() -> dict[str, Any]:
+    return {"schema_name": "通用角色档案", "fields": []}
+
+
+def _default_personality_palette() -> dict[str, Any]:
+    return {
+        "metaphor": "人的性格像调色盘：底色、主色调与点缀共同驱动行为。",
+        "base": "",
+        "main_tones": [],
+        "accents": [],
+        "derivatives": [],
+    }
 
 
 def _dedupe(items) -> list[str]:

@@ -8,7 +8,7 @@ from plugins.platform.plugin_storage import PluginStorage
 
 from .models import ChapterFactSnapshot, CharacterCard
 
-PLUGIN_NAME = "evolution_world_assistant"
+PLUGIN_NAME = "world_evolution_core"
 
 
 class EvolutionWorldRepository:
@@ -82,16 +82,16 @@ class EvolutionWorldRepository:
         return updated
 
     def rebuild_character_cards_from_facts(self, novel_id: str) -> list[dict[str, Any]]:
+        existing_by_name = {
+            card.get("name"): _ensure_character_defaults(dict(card))
+            for card in self.list_character_cards(novel_id).get("items", [])
+            if card.get("name")
+        }
         by_name: dict[str, dict[str, Any]] = {}
         for fact in self.list_fact_snapshots(novel_id):
             snapshot = _snapshot_from_dict(fact)
             for name in snapshot.characters:
-                current = by_name.get(name) or CharacterCard(
-                    character_id=_slug(name),
-                    name=name,
-                    first_seen_chapter=snapshot.chapter_number,
-                    last_seen_chapter=snapshot.chapter_number,
-                ).to_dict()
+                current = by_name.get(name) or _rebuild_seed_card(existing_by_name.get(name), name, snapshot.chapter_number)
                 current["first_seen_chapter"] = min(
                     int(current.get("first_seen_chapter") or snapshot.chapter_number),
                     snapshot.chapter_number,
@@ -194,10 +194,36 @@ def _ensure_character_defaults(card: dict[str, Any]) -> dict[str, Any]:
     card.setdefault("growth_arc", {"stage": "未定", "changes": []})
     card.setdefault("capability_limits", [])
     card.setdefault("decision_biases", [])
+    card.setdefault("appearance", _default_appearance())
+    card.setdefault("attributes", [])
+    card.setdefault("world_profile", {"schema_name": "通用角色档案", "fields": []})
+    card.setdefault("personality_palette", _default_personality_palette())
     return card
 
 
+def _rebuild_seed_card(existing: Optional[dict[str, Any]], name: str, chapter_number: int) -> dict[str, Any]:
+    if existing:
+        current = _ensure_character_defaults(dict(existing))
+        current["first_seen_chapter"] = chapter_number
+        current["last_seen_chapter"] = chapter_number
+        current["recent_events"] = []
+        return current
+    return _ensure_character_defaults(
+        CharacterCard(
+            character_id=_slug(name),
+            name=name,
+            first_seen_chapter=chapter_number,
+            last_seen_chapter=chapter_number,
+        ).to_dict()
+    )
+
+
 def _merge_character_life_state(card: dict[str, Any], update: dict[str, Any], chapter_number: int) -> None:
+    _merge_appearance(card, update.get("appearance"))
+    card["attributes"] = _merge_records(card.get("attributes") or [], update.get("attributes") or [], limit=24)
+    _merge_world_profile(card, update.get("world_profile"))
+    _merge_personality_palette(card, update.get("personality_palette"))
+
     cognitive = card.setdefault("cognitive_state", {"known_facts": [], "unknowns": [], "misbeliefs": []})
     for key in ("known_facts", "unknowns", "misbeliefs"):
         cognitive[key] = _merge_limited_strings(cognitive.get(key) or [], update.get(key) or [], limit=10)
@@ -218,6 +244,131 @@ def _merge_character_life_state(card: dict[str, Any], update: dict[str, Any], ch
         growth["changes"] = growth["changes"][-8:]
     card["capability_limits"] = _merge_limited_strings(card.get("capability_limits") or [], update.get("capability_limits") or [], limit=10)
     card["decision_biases"] = _merge_limited_strings(card.get("decision_biases") or [], update.get("decision_biases") or [], limit=8)
+
+
+def _default_appearance() -> dict[str, Any]:
+    return {"summary": "待从正文补充外貌描写", "features": [], "style": [], "current_outfit": "", "marks": []}
+
+
+def _default_personality_palette() -> dict[str, Any]:
+    return {
+        "metaphor": "人的性格像调色盘：底色、主色调与点缀共同驱动行为。",
+        "base": "",
+        "main_tones": [],
+        "accents": [],
+        "derivatives": [],
+    }
+
+
+def _merge_appearance(card: dict[str, Any], incoming: Any) -> None:
+    current = card.setdefault("appearance", _default_appearance())
+    if not isinstance(incoming, dict):
+        return
+    summary = str(incoming.get("summary") or "").strip()
+    if summary:
+        current["summary"] = summary[:240]
+    outfit = str(incoming.get("current_outfit") or "").strip()
+    if outfit:
+        current["current_outfit"] = outfit[:160]
+    for key, limit in (("features", 12), ("style", 12), ("marks", 12)):
+        current[key] = _merge_limited_strings(current.get(key) or [], incoming.get(key) or [], limit=limit)
+
+
+def _merge_world_profile(card: dict[str, Any], incoming: Any) -> None:
+    current = card.setdefault("world_profile", {"schema_name": "通用角色档案", "fields": []})
+    if not isinstance(incoming, dict):
+        return
+    schema_name = str(incoming.get("schema_name") or "").strip()
+    if schema_name:
+        current["schema_name"] = schema_name[:80]
+    current["fields"] = _merge_records(current.get("fields") or [], incoming.get("fields") or [], limit=24)
+
+
+def _merge_personality_palette(card: dict[str, Any], incoming: Any) -> None:
+    current = card.setdefault("personality_palette", _default_personality_palette())
+    if not isinstance(incoming, dict):
+        return
+    metaphor = str(incoming.get("metaphor") or "").strip()
+    if metaphor:
+        current["metaphor"] = metaphor[:240]
+    base = str(incoming.get("base") or "").strip()
+    if base:
+        current["base"] = base[:40]
+    current["main_tones"] = _merge_limited_strings(current.get("main_tones") or [], incoming.get("main_tones") or [], limit=8)
+    current["accents"] = _merge_limited_strings(current.get("accents") or [], incoming.get("accents") or [], limit=10)
+    current["derivatives"] = _merge_derivatives(current.get("derivatives") or [], incoming.get("derivatives") or [], limit=32)
+
+
+def _merge_records(existing: list[Any], incoming: list[Any], *, limit: int) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in [*existing, *incoming]:
+        record = _normalize_record(item)
+        if not record:
+            continue
+        key = (record.get("category") or "", record.get("name") or "")
+        if key in seen:
+            for index, existing_record in enumerate(result):
+                existing_key = (existing_record.get("category") or "", existing_record.get("name") or "")
+                if existing_key == key:
+                    result[index] = {**existing_record, **{k: v for k, v in record.items() if v}}
+                    break
+            continue
+        seen.add(key)
+        result.append(record)
+    return result[-limit:]
+
+
+def _normalize_record(item: Any) -> Optional[dict[str, str]]:
+    if isinstance(item, str):
+        name, _, value = item.partition(":")
+        record = {"name": name.strip() or "属性", "value": value.strip() or item.strip(), "category": "", "description": ""}
+    elif isinstance(item, dict):
+        record = {
+            "name": str(item.get("name") or "").strip()[:40],
+            "value": str(item.get("value") or "").strip()[:120],
+            "category": str(item.get("category") or "").strip()[:40],
+            "description": str(item.get("description") or "").strip()[:180],
+        }
+    else:
+        return None
+    if not record["name"] or not record["value"]:
+        return None
+    return record
+
+
+def _merge_derivatives(existing: list[Any], incoming: list[Any], *, limit: int) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in [*existing, *incoming]:
+        record = _normalize_derivative(item)
+        if not record:
+            continue
+        key = (record.get("tone") or "", record.get("title") or "", record.get("description") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(record)
+    return result[-limit:]
+
+
+def _normalize_derivative(item: Any) -> Optional[dict[str, Any]]:
+    if isinstance(item, str):
+        record = {"tone": "", "title": "", "description": item.strip()[:300], "trigger": "", "visibility": "", "future": False}
+    elif isinstance(item, dict):
+        record = {
+            "tone": str(item.get("tone") or "").strip()[:40],
+            "title": str(item.get("title") or "").strip()[:60],
+            "description": str(item.get("description") or "").strip()[:300],
+            "trigger": str(item.get("trigger") or "").strip()[:120],
+            "visibility": str(item.get("visibility") or "").strip()[:120],
+            "future": bool(item.get("future")),
+        }
+    else:
+        return None
+    if not record["description"]:
+        return None
+    return record
 
 
 def _merge_limited_strings(existing: list[Any], incoming: list[Any], *, limit: int) -> list[str]:

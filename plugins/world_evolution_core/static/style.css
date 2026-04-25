@@ -105,14 +105,14 @@
 
 .ewa-section { padding: 14px; border-radius: 20px; background: rgba(15,23,42,0.48); border: 1px solid rgba(148,163,184,0.14); }
 .ewa-section-head { display: flex; justify-content: space-between; gap: 12px; align-items: end; margin-bottom: 12px; }
-.ewa-section-head h3 { margin: 0; font-size: 15px; letter-spacing: 0.04em; }
+.ewa-section-head h3 { margin: 0; color: var(--ewa-text); font-size: 15px; letter-spacing: 0.04em; }
 .ewa-section-head p { margin: 0; color: var(--ewa-muted); font-size: 12px; text-align: right; }
 
 .ewa-role-list { display: grid; gap: 10px; }
 .ewa-role-card { display: grid; grid-template-columns: 42px 1fr; gap: 12px; padding: 12px; border-radius: 18px; background: linear-gradient(135deg, rgba(30,41,59,0.88), rgba(30,27,75,0.46)); border: 1px solid rgba(148,163,184,0.13); }
 .ewa-role-avatar { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 14px; background: linear-gradient(135deg, rgba(34,211,238,0.32), rgba(167,139,250,0.45)); color: #fff; font-weight: 900; }
 .ewa-role-topline { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
-.ewa-role-topline h4 { margin: 0; font-size: 15px; }
+.ewa-role-topline h4 { margin: 0; color: var(--ewa-text); font-size: 15px; }
 .ewa-role-topline span { font-size: 11px; color: #c4b5fd; border: 1px solid rgba(196,181,253,0.25); border-radius: 999px; padding: 2px 7px; }
 .ewa-role-meta { margin: 4px 0 8px; color: var(--ewa-muted); font-size: 12px; }
 .ewa-role-event { margin: 0; color: #e2e8f0; line-height: 1.55; font-size: 13px; }
@@ -318,6 +318,7 @@
 
 .ewa-character-hero h3 {
   margin: 0;
+  color: var(--ewa-text);
   font-size: 28px;
 }
 
@@ -330,6 +331,169 @@
 
 .ewa-detail-head {
   margin-top: 16px;
+}
+
+.ewa-profile-grid {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.ewa-profile-card {
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.ewa-profile-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.ewa-profile-card-head h4 {
+  margin: 0;
+  color: var(--ewa-text);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+
+.ewa-profile-card-head span {
+  max-width: 58%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #bae6fd;
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(8, 145, 178, 0.12);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.ewa-profile-card p {
+  margin: 0;
+  color: #dbeafe;
+  line-height: 1.6;
+  font-size: 12px;
+}
+
+.ewa-tag-block {
+  margin-top: 8px;
+}
+
+.ewa-tag-block b {
+  display: block;
+  color: var(--ewa-muted);
+  font-size: 11px;
+}
+
+.ewa-mini-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.ewa-mini-list div {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(30, 41, 59, 0.54);
+}
+
+.ewa-mini-list dt {
+  color: var(--ewa-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ewa-mini-list dd {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ewa-mini-list small {
+  display: block;
+  margin-top: 3px;
+  color: var(--ewa-muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.ewa-palette-card {
+  background:
+    radial-gradient(circle at 18% 12%, rgba(34, 211, 238, 0.13), transparent 30%),
+    linear-gradient(135deg, rgba(49, 46, 129, 0.28), rgba(15, 23, 42, 0.56));
+}
+
+.ewa-palette-strip {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.ewa-palette-strip div {
+  border-left: 3px solid rgba(167, 139, 250, 0.75);
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(30, 41, 59, 0.5);
+}
+
+.ewa-palette-strip b {
+  display: block;
+  color: var(--ewa-muted);
+  font-size: 11px;
+}
+
+.ewa-palette-strip span {
+  display: block;
+  margin-top: 2px;
+  color: #fff;
+  font-weight: 900;
+}
+
+.ewa-derivative-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ewa-derivative-list li {
+  padding: 9px 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(167, 139, 250, 0.18);
+  background: rgba(15, 23, 42, 0.48);
+}
+
+.ewa-derivative-list span {
+  color: var(--ewa-accent-2);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.ewa-derivative-list strong {
+  display: block;
+  margin: 2px 0 4px;
+  color: #fff;
+}
+
+.ewa-derivative-list em {
+  display: block;
+  margin-top: 5px;
+  color: #c4b5fd;
+  font-size: 11px;
+  font-style: normal;
 }
 
 @media (max-width: 640px) {

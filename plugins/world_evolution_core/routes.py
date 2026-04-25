@@ -14,7 +14,7 @@ _service = EvolutionWorldAssistantService()
 @router.get("/status")
 async def get_status():
     return {
-        "plugin_name": "evolution_world_assistant",
+        "plugin_name": "world_evolution_core",
         "version": "0.1.0",
         "status": "installed",
         "phase": "structured-extraction-phase-2",

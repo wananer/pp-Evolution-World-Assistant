@@ -14,7 +14,7 @@ from .preset_converter import convert_st_preset
 from .repositories import EvolutionWorldRepository
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
-PLUGIN_NAME = "evolution_world_assistant"
+PLUGIN_NAME = "world_evolution_core"
 
 
 class EvolutionWorldAssistantService:

@@ -5,7 +5,7 @@
     return;
   }
 
-  const pluginName = 'evolution_world_assistant';
+  const pluginName = 'world_evolution_core';
   const state = {
     activeTab: 'characters',
     viewMode: 'novel',
@@ -162,6 +162,11 @@
     const latest = (item.recent_events || []).at(-1) || {};
     const locations = Array.isArray(latest.locations) ? latest.locations.slice(0, 3) : [];
     const intro = latest.summary || `${item.name || '角色'}在第${item.last_seen_chapter || '-'}章出现。`;
+    const palette = item.personality_palette || {};
+    const paletteChips = [
+      palette.base ? `底色 ${palette.base}` : '',
+      ...(Array.isArray(palette.main_tones) ? palette.main_tones.slice(0, 2) : []),
+    ].filter(Boolean);
     return `
       <button type="button" class="ewa-game-card" data-character-id="${escapeAttr(item.character_id || item.name)}">
         <div class="ewa-game-card-art"><span>${escapeHtml((item.name || '?').slice(0, 1))}</span></div>
@@ -169,7 +174,7 @@
           <div class="ewa-role-topline"><h4>${escapeHtml(item.name || item.character_id)}</h4><span>${escapeHtml(item.status || 'active')}</span></div>
           <p class="ewa-role-meta">首次第${item.first_seen_chapter || '-'}章 · 最近第${item.last_seen_chapter || '-'}章</p>
           <p class="ewa-role-event">${escapeHtml(intro)}</p>
-          ${locations.length ? `<div class="ewa-chip-row">${locations.map((loc) => `<em>${escapeHtml(loc)}</em>`).join('')}</div>` : ''}
+          ${locations.length || paletteChips.length ? `<div class="ewa-chip-row">${[...paletteChips, ...locations].slice(0, 5).map((loc) => `<em>${escapeHtml(loc)}</em>`).join('')}</div>` : ''}
         </div>
       </button>
     `;
@@ -198,6 +203,7 @@
             </div>
           </div>
         </article>
+        ${renderCharacterProfile(item)}
         <div class="ewa-section-head ewa-detail-head">
           <h3>角色动态</h3>
           <p>按章节倒序显示</p>
@@ -209,6 +215,119 @@
         </ol>
       </section>
     `;
+  }
+
+  function renderCharacterProfile(item) {
+    return `
+      <div class="ewa-profile-grid">
+        ${renderAppearanceCard(item.appearance)}
+        ${renderRecordsCard('属性', item.attributes, '随小说世界观自由定义')}
+        ${renderWorldProfileCard(item.world_profile)}
+        ${renderPaletteCard(item.personality_palette)}
+      </div>
+    `;
+  }
+
+  function renderAppearanceCard(appearance) {
+    const data = appearance && typeof appearance === 'object' ? appearance : {};
+    const features = Array.isArray(data.features) ? data.features : [];
+    const style = Array.isArray(data.style) ? data.style : [];
+    const marks = Array.isArray(data.marks) ? data.marks : [];
+    const hasRealContent = [data.summary, data.current_outfit, ...features, ...style, ...marks].some((value) => value && !String(value).includes('待从正文补充'));
+    return `
+      <article class="ewa-profile-card">
+        <div class="ewa-profile-card-head"><h4>外貌</h4><span>${hasRealContent ? '已记录' : '待补充'}</span></div>
+        <p>${escapeHtml(data.summary || '待从正文补充外貌描写。')}</p>
+        ${data.current_outfit ? `<dl class="ewa-mini-list"><div><dt>当前装束</dt><dd>${escapeHtml(data.current_outfit)}</dd></div></dl>` : ''}
+        ${renderTagBlock('特征', features)}
+        ${renderTagBlock('风格', style)}
+        ${renderTagBlock('标记', marks)}
+      </article>
+    `;
+  }
+
+  function renderRecordsCard(title, records, emptyText) {
+    const items = normalizeRecords(records);
+    return `
+      <article class="ewa-profile-card">
+        <div class="ewa-profile-card-head"><h4>${escapeHtml(title)}</h4><span>${items.length || 'open'}</span></div>
+        ${items.length ? renderRecordList(items) : `<p>${escapeHtml(emptyText || '暂无记录。')}</p>`}
+      </article>
+    `;
+  }
+
+  function renderWorldProfileCard(profile) {
+    const data = profile && typeof profile === 'object' ? profile : {};
+    const schemaName = data.schema_name || '通用角色档案';
+    return `
+      <article class="ewa-profile-card">
+        <div class="ewa-profile-card-head"><h4>世界观字段</h4><span>${escapeHtml(schemaName)}</span></div>
+        ${normalizeRecords(data.fields).length ? renderRecordList(normalizeRecords(data.fields)) : '<p>本书可自定义修为、职业、阵营、关系、危险等级等字段。</p>'}
+      </article>
+    `;
+  }
+
+  function renderPaletteCard(palette) {
+    const data = palette && typeof palette === 'object' ? palette : {};
+    const mainTones = Array.isArray(data.main_tones) ? data.main_tones : [];
+    const accents = Array.isArray(data.accents) ? data.accents : [];
+    const derivatives = Array.isArray(data.derivatives) ? data.derivatives : [];
+    return `
+      <article class="ewa-profile-card ewa-palette-card">
+        <div class="ewa-profile-card-head"><h4>性格调色盘</h4><span>${derivatives.length} 衍生</span></div>
+        <p>${escapeHtml(data.metaphor || '人的性格像调色盘：底色、主色调与点缀共同驱动行为。')}</p>
+        <div class="ewa-palette-strip">
+          ${data.base ? `<div><b>底色</b><span>${escapeHtml(data.base)}</span></div>` : ''}
+          ${mainTones.length ? `<div><b>主色调</b><span>${mainTones.map(escapeHtml).join('、')}</span></div>` : ''}
+          ${accents.length ? `<div><b>点缀</b><span>${accents.map(escapeHtml).join('、')}</span></div>` : ''}
+        </div>
+        ${derivatives.length ? `
+          <ol class="ewa-derivative-list">
+            ${derivatives.map((item) => `
+              <li>
+                <span>${escapeHtml(item.tone || '衍生')}${item.future ? ' · 未来' : ''}</span>
+                <strong>${escapeHtml(item.title || item.tone || '行为衍生')}</strong>
+                <p>${escapeHtml(item.description || '')}</p>
+                ${item.trigger || item.visibility ? `<em>${escapeHtml([item.trigger, item.visibility].filter(Boolean).join(' · '))}</em>` : ''}
+              </li>
+            `).join('')}
+          </ol>
+        ` : '<p>暂无性格衍生记录。</p>'}
+      </article>
+    `;
+  }
+
+  function renderTagBlock(label, items) {
+    if (!Array.isArray(items) || !items.length) return '';
+    return `<div class="ewa-tag-block"><b>${escapeHtml(label)}</b><div class="ewa-chip-row">${items.map((item) => `<em>${escapeHtml(item)}</em>`).join('')}</div></div>`;
+  }
+
+  function renderRecordList(items) {
+    return `
+      <dl class="ewa-mini-list">
+        ${items.map((item) => `
+          <div>
+            <dt>${escapeHtml(item.name)}</dt>
+            <dd>${escapeHtml(item.value)}${item.description ? `<small>${escapeHtml(item.description)}</small>` : ''}</dd>
+          </div>
+        `).join('')}
+      </dl>
+    `;
+  }
+
+  function normalizeRecords(records) {
+    if (!Array.isArray(records)) return [];
+    return records
+      .map((item) => {
+        if (typeof item === 'string') return { name: '属性', value: item, description: '' };
+        if (!item || typeof item !== 'object') return null;
+        return {
+          name: item.name || item.category || '属性',
+          value: item.value || '',
+          description: item.description || '',
+        };
+      })
+      .filter((item) => item && item.name && item.value);
   }
 
   function bindCharacterInteractions(root) {
