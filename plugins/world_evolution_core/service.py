@@ -41,6 +41,7 @@ class EvolutionWorldAssistantService:
         premise = str(meta.get("premise") or "").strip()
         genre = str(meta.get("genre") or "").strip()
         world_preset = str(meta.get("world_preset") or "").strip()
+        style_hint = str(meta.get("style_hint") or "").strip()
         target_chapters = _int_or_none(meta.get("target_chapters"))
         length_tier = str(meta.get("length_tier") or "").strip()
         existing = self.repository.get_prehistory_worldline(novel_id)
@@ -50,6 +51,7 @@ class EvolutionWorldAssistantService:
             premise=premise,
             genre=genre,
             world_preset=world_preset,
+            style_hint=style_hint,
             target_chapters=target_chapters,
             length_tier=length_tier,
             at=started_at,
@@ -77,6 +79,7 @@ class EvolutionWorldAssistantService:
                     "title": title,
                     "genre": genre,
                     "world_preset": world_preset,
+                    "style_hint": style_hint,
                     "target_chapters": target_chapters,
                     "length_tier": length_tier,
                 },
@@ -101,7 +104,9 @@ class EvolutionWorldAssistantService:
         if not evidence:
             return {"ok": True, "skipped": True, "reason": "no prehistory worldline yet"}
 
-        content = _render_story_planning_evidence(evidence)
+        style_adapter = _build_runtime_style_adapter(evidence.get("worldline") or {}, nested)
+        evidence["style_adapter"] = style_adapter
+        content = _render_story_planning_evidence(evidence, style_adapter=style_adapter)
         return {
             "ok": True,
             "data": evidence,
@@ -477,12 +482,20 @@ def _build_prehistory_worldline(
     premise: str,
     genre: str,
     world_preset: str,
+    style_hint: str,
     target_chapters: Optional[int],
     length_tier: str,
     at: str,
 ) -> dict[str, Any]:
     profile = _select_worldline_profile(genre, world_preset, premise, target_chapters, length_tier)
     axes = _infer_story_axes(genre, world_preset, premise)
+    style_adapter = _build_style_adapter(
+        title=title,
+        premise=premise,
+        genre=genre,
+        world_preset=world_preset,
+        style_hint=style_hint,
+    )
     forces = _build_world_forces(axes, profile)
     eras = _build_prehistory_eras(profile, axes, forces, title)
     seeds = _build_prehistory_foreshadow_seeds(profile, axes, forces)
@@ -503,6 +516,7 @@ def _build_prehistory_worldline(
             "reason": profile["reason"],
         },
         "story_axes": axes,
+        "style_adapter": style_adapter,
         "eras": eras,
         "forces": forces,
         "foreshadow_seeds": seeds,
@@ -706,12 +720,209 @@ def _build_prehistory_guidance(profile: dict[str, Any], axes: list[str]) -> list
     return guidance
 
 
-def _render_story_planning_evidence(evidence: dict[str, Any]) -> str:
+def _build_style_adapter(
+    *,
+    title: str = "",
+    premise: str = "",
+    genre: str = "",
+    world_preset: str = "",
+    style_hint: str = "",
+) -> dict[str, Any]:
+    raw_text = "\n".join(part for part in [style_hint, genre, world_preset, premise, title] if part).strip()
+    tags = _detect_style_tags(raw_text)
+    primary = tags[0] if tags else "custom_or_unspecified"
+    strategy = _style_strategy(primary)
+    return {
+        "schema_version": 1,
+        "mode": "semantic_first_style_late_binding",
+        "requested_style": style_hint[:500],
+        "detected_style_tags": tags or ["custom_or_unspecified"],
+        "primary_style": primary,
+        "rendering_strategy": strategy,
+        "adaptation_contract": [
+            "Evolution 前史是语义蓝图，不是最终正文；规划和写作时必须按小说当前文风重新表达。",
+            "保留因果、秘密、代价、伏笔功能，允许彻底改写措辞、节奏、意象、叙述视角和信息密度。",
+            "若用户/Bible/章节样本文风与本适配器不一致，以最新显式文风为准。",
+            "不要把前史条目机械塞进正文；只能转化为符合文风的场景痕迹、人物选择、传闻、物件或沉默。",
+        ],
+        "style_axes": {
+            "diction": strategy["diction"],
+            "sentence_rhythm": strategy["sentence_rhythm"],
+            "imagery": strategy["imagery"],
+            "information_density": strategy["information_density"],
+            "revelation": strategy["revelation"],
+        },
+    }
+
+
+def _build_runtime_style_adapter(worldline: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    stored = worldline.get("style_adapter") if isinstance(worldline.get("style_adapter"), dict) else {}
+    style_hint = _extract_runtime_style_hint(payload)
+    if not style_hint:
+        return stored or _build_style_adapter()
+    runtime = _build_style_adapter(
+        title=str(worldline.get("title") or ""),
+        premise=str(payload.get("premise") or payload.get("novel_premise") or ""),
+        genre=str(payload.get("genre") or ""),
+        world_preset=str(payload.get("world_preset") or ""),
+        style_hint=style_hint,
+    )
+    runtime["base_detected_style_tags"] = stored.get("detected_style_tags") or []
+    runtime["style_source"] = "runtime_payload"
+    return runtime
+
+
+def _extract_runtime_style_hint(payload: dict[str, Any]) -> str:
+    candidates: list[str] = []
+    for key in ("style_hint", "style", "writing_style", "voice", "tone"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            candidates.append(value)
+    bible_context = payload.get("bible_context") if isinstance(payload.get("bible_context"), dict) else {}
+    if bible_context:
+        for key in ("style_hint", "style", "writing_style", "voice", "tone"):
+            value = str(bible_context.get(key) or "").strip()
+            if value:
+                candidates.append(value)
+        for note in bible_context.get("style_notes") or []:
+            if isinstance(note, dict):
+                content = str(note.get("content") or note.get("description") or "").strip()
+                category = str(note.get("category") or "").strip()
+                if content:
+                    candidates.append(f"{category}: {content}" if category else content)
+            else:
+                value = str(note or "").strip()
+                if value:
+                    candidates.append(value)
+    return "\n".join(candidates)[:1200]
+
+
+def _detect_style_tags(text: str) -> list[str]:
+    value = str(text or "").lower()
+    buckets = [
+        ("poetic_lyrical", ["诗", "抒情", "散文", "意象", "唯美", "朦胧", "浪漫", " lyrical", "poetic"]),
+        ("plain_realist", ["白描", "现实", "纪实", "克制", "冷静", "平实", "生活流", "realist", "minimal"]),
+        ("fast_web_serial", ["爽文", "热血", "节奏快", "强情绪", "打脸", "升级", "网文", "serial"]),
+        ("comedic_light", ["轻松", "吐槽", "搞笑", "喜剧", "沙雕", "幽默", "日常向", "comedy"]),
+        ("classical_archaic", ["古风", "文言", "典雅", "志怪", "章回", "古典", "classical"]),
+        ("hardboiled_noir", ["冷硬", "黑色", "硬汉", "犯罪", "侦探", "noir", "hardboiled"]),
+        ("cosmic_ominous", ["克苏鲁", "诡异", "恐怖", "压抑", "阴郁", "不可名状", "ominous", "horror"]),
+        ("technical_sf", ["硬科幻", "技术", "赛博", "算法", "工程", "实验", "cyber", "sci-fi", "science fiction"]),
+        ("fairytale_fable", ["童话", "寓言", "儿童", "温柔", "治愈", "fairytale", "fable"]),
+        ("epic_chronicle", ["史诗", "编年", "群像", "战争史", "王朝", "文明史", "chronicle", "epic"]),
+    ]
+    tags = [name for name, terms in buckets if any(term in value for term in terms)]
+    return tags[:4]
+
+
+def _style_strategy(primary: str) -> dict[str, str]:
+    strategies = {
+        "poetic_lyrical": {
+            "diction": "用意象、感官和隐喻承载信息，少用制度说明词。",
+            "sentence_rhythm": "句式可长短错落，保留回声和余韵。",
+            "imagery": "把前史转成物候、颜色、声音、旧物和身体感受。",
+            "information_density": "低到中；一次只透露一层情绪化线索。",
+            "revelation": "先给象征，再给事实，真相像潮水一样回返。",
+        },
+        "plain_realist": {
+            "diction": "用日常、具体、克制的词，避免宏大抽象名词压过人物生活。",
+            "sentence_rhythm": "中短句为主，因果藏在行动和细节里。",
+            "imagery": "使用账单、校规、工位、病历、街道等可触摸物。",
+            "information_density": "中；每个线索服务一个现实压力。",
+            "revelation": "通过人物碰壁、旁人回避、制度流程逐步显影。",
+        },
+        "fast_web_serial": {
+            "diction": "用目标、阻力、赌注、反转来表达前史，保持可读性和推进感。",
+            "sentence_rhythm": "短句和强转折更优先。",
+            "imagery": "线索要能迅速变成冲突、奖励、惩罚或升级资源。",
+            "information_density": "中到高；每幕至少让一条前史因果推动爽点或危机。",
+            "revelation": "误导-爆点-更大黑幕，分层抬高期待。",
+        },
+        "comedic_light": {
+            "diction": "用轻巧、反差和吐槽式误会承载严肃因果。",
+            "sentence_rhythm": "短促灵活，允许包袱后突然落入真相。",
+            "imagery": "把秘密藏在尴尬物件、错位对话和日常事故里。",
+            "information_density": "低到中；不要让设定解释压垮喜剧节奏。",
+            "revelation": "先当笑点，再在关键处证明笑点是伏笔。",
+        },
+        "classical_archaic": {
+            "diction": "用典雅、含蓄、礼法/名分/旧闻承载因果。",
+            "sentence_rhythm": "整饬、留白，少用现代术语。",
+            "imagery": "碑、谱牒、旧诏、祠堂、风物和传闻适合承载前史。",
+            "information_density": "中；重传承和名分变迁。",
+            "revelation": "由传闻、旧物、礼制破绽层层反证。",
+        },
+        "hardboiled_noir": {
+            "diction": "冷、硬、短，重事实、伤痕、交易和背叛。",
+            "sentence_rhythm": "短句优先，少解释，多压迫。",
+            "imagery": "雨夜、档案袋、烟味、账本、监控盲区等具体痕迹。",
+            "information_density": "中高；每条线索都带风险。",
+            "revelation": "让真相像旧伤一样被迫撕开。",
+        },
+        "cosmic_ominous": {
+            "diction": "避免直接解释不可名状之物，用异常、缺页、重复梦境和认知污染呈现。",
+            "sentence_rhythm": "逐步失稳，允许不完全解释。",
+            "imagery": "星象、潮声、畸形仪式、腐蚀文字、无法对齐的时间。",
+            "information_density": "低到中；保留未知感。",
+            "revelation": "每次解释只揭开更深的不安。",
+        },
+        "technical_sf": {
+            "diction": "用系统、协议、实验、数据缺口和工程限制表达因果。",
+            "sentence_rhythm": "清晰准确，避免玄学化。",
+            "imagery": "日志、接口、传感器异常、材料疲劳、算法偏差。",
+            "information_density": "中高；前史要能支持机制推演。",
+            "revelation": "先暴露观测异常，再追溯设计缺陷或历史篡改。",
+        },
+        "fairytale_fable": {
+            "diction": "用简单、温柔、象征性的词承载深层因果。",
+            "sentence_rhythm": "明亮、重复、有寓言感。",
+            "imagery": "钥匙、门、森林、灯、名字、约定。",
+            "information_density": "低；一个象征对应一个秘密。",
+            "revelation": "让真相像寓言教训一样自然浮现。",
+        },
+        "epic_chronicle": {
+            "diction": "用编年、誓约、迁徙、王朝和代际代价表达前史。",
+            "sentence_rhythm": "稳重，有历史纵深。",
+            "imagery": "年表、城邦、血脉、盟约、战场遗址。",
+            "information_density": "高；允许多势力、多时代并置。",
+            "revelation": "从个人命运回望文明级因果。",
+        },
+    }
+    return strategies.get(
+        primary,
+        {
+            "diction": "跟随用户最新文风提示；无法归类时只保留语义功能，不规定措辞。",
+            "sentence_rhythm": "匹配样本文本的句长、停顿和叙述视角。",
+            "imagery": "沿用小说自身反复出现的物象，不引入违和符号。",
+            "information_density": "弹性；按目标文风决定铺陈或留白。",
+            "revelation": "按目标文风选择直给、留白、象征、反转或对话侧写。",
+        },
+    )
+
+
+def _render_story_planning_evidence(evidence: dict[str, Any], *, style_adapter: Optional[dict[str, Any]] = None) -> str:
     worldline = evidence.get("worldline") or {}
     depth = worldline.get("depth") or {}
+    style_adapter = style_adapter or worldline.get("style_adapter") or {}
     lines = [
         f"前史深度：{depth.get('label', '未定')}；跨度：约{depth.get('horizon_years', 0)}年；原因：{depth.get('reason', '')}",
     ]
+    if style_adapter:
+        axes = style_adapter.get("style_axes") or {}
+        lines.append("【文风适配协议】")
+        lines.append(f"- 当前文风标签：{'、'.join(_as_strings(style_adapter.get('detected_style_tags'))) or '自定义/未指定'}；前史条目只作为语义蓝图，不能原样写进正文。")
+        if style_adapter.get("requested_style"):
+            lines.append(f"- 用户/Bible文风提示：{str(style_adapter.get('requested_style'))[:240]}")
+        for item in style_adapter.get("adaptation_contract") or []:
+            lines.append(f"- {item}")
+        if axes:
+            lines.append(
+                "- 转译方式："
+                f"措辞={axes.get('diction', '')}；"
+                f"节奏={axes.get('sentence_rhythm', '')}；"
+                f"意象={axes.get('imagery', '')}；"
+                f"揭示={axes.get('revelation', '')}"
+            )
     if evidence.get("eras"):
         lines.append("【故事开始前的世界线】")
         for era in evidence["eras"]:

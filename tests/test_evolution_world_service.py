@@ -665,3 +665,41 @@ async def test_before_story_planning_returns_worldline_and_foreshadow_context(tm
     assert "故事开始前的世界线" in block["content"]
     assert "可用于大纲与伏笔的种子" in block["content"]
     assert result["data"]["foreshadow_seeds"]
+
+
+@pytest.mark.asyncio
+async def test_story_planning_context_adapts_to_runtime_style_hint(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    await service.after_novel_created(
+        {
+            "novel_id": "novel-style-adapt",
+            "payload": {
+                "title": "雾港来信",
+                "genre": "悬疑",
+                "premise": "主角追查一封被迟寄十年的信。",
+                "target_chapters": 180,
+                "style_hint": "冷硬黑色侦探文风，短句，克制，像旧伤一样揭开真相。",
+            },
+        }
+    )
+
+    result = service.before_story_planning(
+        {
+            "novel_id": "novel-style-adapt",
+            "payload": {
+                "purpose": "macro_outline_planning",
+                "style_hint": "改为诗性散文文风，意象浓，节奏舒缓，用海雾、灯和旧信承载伏笔。",
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    adapter = result["data"]["style_adapter"]
+    content = result["context_blocks"][0]["content"]
+    assert adapter["style_source"] == "runtime_payload"
+    assert adapter["primary_style"] == "poetic_lyrical"
+    assert "文风适配协议" in content
+    assert "语义蓝图" in content
+    assert "诗性散文" in content
+    assert "不能原样写进正文" in content
