@@ -40,8 +40,8 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     patch = context["context_patch"]
     assert patch["merge_strategy"] == "append_by_priority"
     assert patch["estimated_token_budget"] > 0
-    assert [block["id"] for block in patch["blocks"]][:2] == ["focus_characters", "recent_facts"]
-    assert patch["blocks"][0]["kind"] == "focus_character_state"
+    assert [block["id"] for block in patch["blocks"]][:3] == ["evolution_usage_protocol", "focus_characters", "recent_facts"]
+    assert patch["blocks"][1]["kind"] == "focus_character_state"
 
 
 @pytest.mark.asyncio
@@ -351,7 +351,14 @@ async def test_rich_character_card_tracks_cognition_growth_and_limits(tmp_path):
         }
     )
     content = context["context_blocks"][0]["content"]
-    assert "认知已知" in content
-    assert "认知盲区" in content
-    assert "能力边界" in content
+    assert "不是本章任务清单" in content
+    assert "不要逐条复述" in content
+    assert "硬边界（不可无过渡违反）" in content
+    assert "软倾向（可被情境改变）" in content
+    assert "可变状态（允许随新证据更新）" in content
+    assert "已知=黑色钥匙能响应黑塔密门" in content
+    assert "未知=不知道密门后的守卫是谁" in content
+    assert "能力边界=不能凭空知道黑塔机关" in content
     assert "从逞强独闯转向承认自己需要验证线索" in content
+    for locked_phrase in ["必须写", "必写", "必须展开", "固定发展路线"]:
+        assert locked_phrase not in content

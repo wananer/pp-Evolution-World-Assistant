@@ -26,6 +26,17 @@ def build_context_patch(
     if focus_characters:
         blocks.append(
             {
+                "id": "evolution_usage_protocol",
+                "title": "Evolution 使用方式",
+                "kind": "usage_protocol",
+                "priority": 78,
+                "token_budget": 120,
+                "content": _render_usage_protocol(),
+                "items": [],
+            }
+        )
+        blocks.append(
+            {
                 "id": "focus_characters",
                 "title": "本章焦点角色",
                 "kind": "focus_character_state",
@@ -160,6 +171,13 @@ def _extract_context_terms(text: str) -> list[str]:
     return terms
 
 
+def _render_usage_protocol() -> str:
+    return (
+        "以下内容是角色连续性参考，不是本章任务清单；不要逐条复述，也不要为使用这些信息强行安排情节。"
+        "硬边界用于避免逻辑越界；软倾向只影响选择风格；可变状态可在本章新证据刺激下自然更新。"
+    )
+
+
 def _render_focus_characters(characters: list[dict[str, Any]]) -> str:
     lines = []
     for card in characters:
@@ -182,31 +200,40 @@ def _render_life_parts(card: dict[str, Any]) -> str:
     known = _join_limited(cognitive.get("known_facts"), 2)
     unknowns = _join_limited(cognitive.get("unknowns"), 2)
     misbeliefs = _join_limited(cognitive.get("misbeliefs"), 1)
+    hard: list[str] = []
+    soft: list[str] = []
+    mutable: list[str] = []
     if known:
-        parts.append(f"认知已知：{known}")
+        hard.append(f"已知={known}")
     if unknowns:
-        parts.append(f"认知盲区：{unknowns}")
+        hard.append(f"未知={unknowns}")
     if misbeliefs:
-        parts.append(f"误判/偏见：{misbeliefs}")
+        mutable.append(f"误判={misbeliefs}")
     emotional = (card.get("emotional_arc") or [])[-1:]
     if emotional:
         item = emotional[0]
         emotion = item.get("emotion") or ""
         change = item.get("inner_change") or ""
         if emotion or change:
-            parts.append(f"心路：{_clean_display_text(emotion)}{'，' if emotion and change else ''}{_clean_display_text(change)}")
+            mutable.append(f"心路={_clean_display_text(emotion)}{'，' if emotion and change else ''}{_clean_display_text(change)}")
     growth = card.get("growth_arc") or {}
     if growth.get("stage") and growth.get("stage") != "未定":
-        parts.append(f"成长阶段：{_clean_display_text(growth.get('stage'))}")
+        mutable.append(f"成长阶段={_clean_display_text(growth.get('stage'))}")
     latest_growth = (growth.get("changes") or [])[-1:]
     if latest_growth:
-        parts.append(f"成长变化：{_clean_display_text(latest_growth[0].get('summary'))}")
+        mutable.append(f"成长变化={_clean_display_text(latest_growth[0].get('summary'))}")
     limits = _join_limited(card.get("capability_limits"), 2)
     if limits:
-        parts.append(f"能力边界：{limits}")
+        hard.append(f"能力边界={limits}")
     biases = _join_limited(card.get("decision_biases"), 2)
     if biases:
-        parts.append(f"决策倾向：{biases}")
+        soft.append(f"决策倾向={biases}")
+    if hard:
+        parts.append("硬边界（不可无过渡违反）：" + "；".join(hard))
+    if soft:
+        parts.append("软倾向（可被情境改变）：" + "；".join(soft))
+    if mutable:
+        parts.append("可变状态（允许随新证据更新）：" + "；".join(mutable))
     return "；".join(part for part in parts if part)
 
 
