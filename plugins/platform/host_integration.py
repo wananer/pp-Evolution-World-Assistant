@@ -65,6 +65,69 @@ async def notify_chapter_committed(
         return [{"plugin_name": "plugin_platform", "hook_name": "after_commit", "ok": False, "error": str(exc)}]
 
 
+async def notify_novel_created_with_plugins(
+    novel_id: str,
+    title: str,
+    premise: str,
+    *,
+    author: str = "",
+    genre: str = "",
+    world_preset: str = "",
+    target_chapters: int | None = None,
+    length_tier: str | None = None,
+    target_words_per_chapter: int | None = None,
+    source: str = "novel_create",
+) -> list[dict[str, Any]]:
+    """Notify plugins after a novel is created so they can seed per-novel state."""
+    try:
+        return await dispatch_hook(
+            "after_novel_created",
+            {
+                "novel_id": novel_id,
+                "trigger_type": source,
+                "source": source,
+                "payload": {
+                    "title": title,
+                    "author": author,
+                    "premise": premise,
+                    "genre": genre,
+                    "world_preset": world_preset,
+                    "target_chapters": target_chapters,
+                    "length_tier": length_tier,
+                    "target_words_per_chapter": target_words_per_chapter,
+                },
+            },
+        )
+    except Exception as exc:
+        logger.warning("Plugin after_novel_created failed novel=%s: %s", novel_id, exc)
+        return [{"plugin_name": "plugin_platform", "hook_name": "after_novel_created", "ok": False, "error": str(exc)}]
+
+
+def collect_story_planning_context_with_plugins(
+    novel_id: str,
+    *,
+    purpose: str,
+    payload: dict[str, Any] | None = None,
+    source: str = "story_planning",
+    max_chars: int = 6000,
+) -> str:
+    """Return plugin-provided story planning context for outline/foreshadowing prompts."""
+    try:
+        results = dispatch_hook_sync(
+            "before_story_planning",
+            {
+                "novel_id": novel_id,
+                "trigger_type": purpose,
+                "source": source,
+                "payload": {"purpose": purpose, **(payload or {})},
+            },
+        )
+        return render_context_blocks(results, max_chars=max_chars)
+    except Exception as exc:
+        logger.warning("Plugin story planning context failed novel=%s purpose=%s: %s", novel_id, purpose, exc)
+        return ""
+
+
 async def review_chapter_with_plugins(
     novel_id: str,
     chapter_number: int,

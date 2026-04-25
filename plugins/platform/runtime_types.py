@@ -10,8 +10,10 @@ PluginHookName = Literal[
     "after_commit",
     "manual_rebuild",
     "rollback",
-    "review_chapter",
+    "after_novel_created",
+    "before_story_planning",
     "before_chapter_review",
+    "review_chapter",
     "after_chapter_review",
 ]
 

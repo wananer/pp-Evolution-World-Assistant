@@ -32,6 +32,8 @@ async def get_status():
             "chapter_review",
             "timeline_events",
             "continuity_constraints",
+            "prehistory_worldline",
+            "story_planning_context",
         ],
     }
 
@@ -90,6 +92,14 @@ async def list_timeline_events(novel_id: str, before_chapter: Optional[int] = No
 @router.get("/novels/{novel_id}/timeline/constraints")
 async def list_continuity_constraints(novel_id: str, limit: int = 80):
     return _service.list_continuity_constraints(novel_id, limit=limit)
+
+
+@router.get("/novels/{novel_id}/prehistory/worldline")
+async def get_prehistory_worldline(novel_id: str):
+    worldline = _service.repository.get_prehistory_worldline(novel_id)
+    if not worldline:
+        raise HTTPException(status_code=404, detail="prehistory worldline not found")
+    return worldline
 
 
 @router.get("/novels/{novel_id}/timeline/review-records")

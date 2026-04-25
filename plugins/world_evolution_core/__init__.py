@@ -9,13 +9,15 @@ def init_api(app) -> None:
     from .service import EvolutionWorldAssistantService
 
     service = EvolutionWorldAssistantService()
+    register_hook("world_evolution_core", "after_novel_created", service.after_novel_created)
+    register_hook("world_evolution_core", "before_story_planning", service.before_story_planning)
     register_hook("world_evolution_core", "after_commit", service.after_commit)
-    register_hook("world_evolution_core", "after_chapter_review", service.after_chapter_review)
-    register_hook("world_evolution_core", "before_chapter_review", service.before_chapter_review)
     register_hook("world_evolution_core", "before_context_build", service.before_context_build)
+    register_hook("world_evolution_core", "before_chapter_review", service.before_chapter_review)
     register_hook("world_evolution_core", "manual_rebuild", service.manual_rebuild)
     register_hook("world_evolution_core", "rollback", service.rollback)
     register_hook("world_evolution_core", "review_chapter", service.review_chapter)
+    register_hook("world_evolution_core", "after_chapter_review", service.after_chapter_review)
 
     prefix = "/api/v1/plugins/evolution-world"
     if not any(getattr(route, "path", "").startswith(prefix) for route in app.routes):

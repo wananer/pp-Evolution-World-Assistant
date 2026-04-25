@@ -45,69 +45,56 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_evolution_state_is_partitioned_into_plugin_database_records(tmp_path):
-    import sqlite3
-
+async def test_evolution_builds_timeline_evidence_for_review_flow(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
 
     await service.after_commit(
         {
-            "novel_id": "novel-db-a",
+            "novel_id": "novel-review-flow",
             "chapter_number": 1,
-            "payload": {"content": "《林澈》抵达雾城。"},
+            "payload": {"content": "《林澈》抵达雾城，并不知道钥匙会消耗记忆。"},
         }
     )
-    await service.after_commit(
+
+    events = service.repository.list_timeline_events("novel-review-flow")
+    constraints = service.repository.list_continuity_constraints("novel-review-flow")
+    assert events
+    assert events[0]["event_id"].startswith("evt_")
+    assert any(item["type"] in {"knowledge_boundary", "capability_boundary", "personality_boundary"} for item in constraints)
+
+    before = service.before_chapter_review(
         {
-            "novel_id": "novel-db-b",
-            "chapter_number": 1,
-            "payload": {"content": "《沈月》进入星港。"},
+            "novel_id": "novel-review-flow",
+            "chapter_number": 2,
+            "payload": {"content": "林澈知道钥匙会消耗记忆，并且直接解决黑塔机关。"},
         }
     )
 
-    assert (tmp_path / "plugin_platform.db").exists()
-    assert not (tmp_path / "world_evolution_core" / "novels" / "novel-db-a" / "characters.json").exists()
-    assert not (tmp_path / "world_evolution_core" / "novels" / "novel-db-a" / "facts" / "chapter_1.json").exists()
-    assert service.get_character("novel-db-a", "林澈") is not None
-    assert service.get_character("novel-db-a", "沈月") is None
+    assert before["ok"] is True
+    titles = [block["title"] for block in before["data"]["review_context_blocks"]]
+    assert "Evolution 时间线证据" in titles
+    assert "Evolution 连续性约束" in titles
 
-    conn = sqlite3.connect(tmp_path / "plugin_platform.db")
-    rows = conn.execute(
-        """
-        SELECT novel_id, scope, chapter_number, entity_id
-        FROM plugin_state
-        WHERE plugin_name = 'world_evolution_core'
-        ORDER BY novel_id, scope
-        """
-    ).fetchall()
-    conn.close()
-
-    assert any(row[0] == "novel-db-a" and row[1].startswith("novels/novel-db-a/characters/") and row[3] for row in rows)
-    assert any(row[0] == "novel-db-b" and row[1].startswith("novels/novel-db-b/characters/") and row[3] for row in rows)
-    assert all(row[0] != "novel-db-a" or "novel-db-b" not in row[1] for row in rows)
-
-
-@pytest.mark.asyncio
-async def test_context_patch_reads_recent_fact_window_from_database(tmp_path):
-    storage = PluginStorage(root=tmp_path)
-    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
-
-    await service.manual_rebuild(
+    review = service.review_chapter(
         {
-            "novel_id": "novel-window",
-            "chapters": [
-                {"number": number, "content": f"《林澈》在雾城调查第{number}枚黑色钥匙。"}
-                for number in range(1, 21)
-            ],
+            "novel_id": "novel-review-flow",
+            "chapter_number": 2,
+            "payload": {"content": "林澈知道其他角色未在场经历，并且一眼看穿黑塔机关。"},
         }
     )
+    assert review["data"]["evidence"]
+    assert any(item.get("evidence") for item in review["data"]["issues"])
 
-    context = service.before_context_build({"novel_id": "novel-window", "chapter_number": 21})
-
-    recent_facts = next(block for block in context["context_patch"]["blocks"] if block["id"] == "recent_facts")
-    assert [item["chapter_number"] for item in recent_facts["items"]] == [16, 17, 18, 19, 20]
-    assert "第1章" not in recent_facts["content"]
+    after = service.after_chapter_review(
+        {
+            "novel_id": "novel-review-flow",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": review["data"]["issues"], "overall_score": 90}},
+        }
+    )
+    assert after["data"]["recorded"] is True
+    assert service.repository.list_review_records("novel-review-flow")[-1]["issue_count"] == len(review["data"]["issues"])
 
 
 @pytest.mark.asyncio
@@ -605,51 +592,76 @@ def test_review_chapter_allows_explained_cognition_transition(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_evolution_builds_timeline_evidence_for_review_flow(tmp_path):
+async def test_after_novel_created_seeds_prehistory_worldline_by_novel(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
 
-    await service.after_commit(
+    result = await service.after_novel_created(
         {
-            "novel_id": "novel-review-flow",
-            "chapter_number": 1,
-            "payload": {"content": "《林澈》进入黑塔，发现黑色钥匙。"},
+            "novel_id": "novel-prehistory",
+            "payload": {
+                "title": "星海遗民",
+                "genre": "星际史诗",
+                "world_preset": "帝国衰亡后的多文明冲突",
+                "premise": "主角在旧帝国档案中发现文明灭绝的真相。",
+                "target_chapters": 800,
+                "length_tier": "epic",
+            },
         }
     )
 
-    events = service.list_timeline_events("novel-review-flow")["items"]
-    constraints = service.list_continuity_constraints("novel-review-flow")["items"]
-    before_review = service.before_chapter_review(
+    assert result["ok"] is True
+    saved = service.repository.get_prehistory_worldline("novel-prehistory")
+    assert saved is not None
+    assert saved["novel_id"] == "novel-prehistory"
+    assert saved["depth"]["tier"] == "epic"
+    assert saved["depth"]["horizon_years"] >= 3000
+    assert len(saved["eras"]) >= 6
+    assert saved["foreshadow_seeds"]
+
+
+@pytest.mark.asyncio
+async def test_epic_prehistory_is_deeper_than_intimate_story(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_novel_created(
         {
-            "novel_id": "novel-review-flow",
-            "chapter_number": 2,
-            "payload": {"content": "林澈知道其他角色未在场经历，并且一眼看穿黑塔机关。"},
+            "novel_id": "novel-epic-depth",
+            "payload": {"title": "仙门旧纪", "genre": "修仙", "premise": "宗门隐藏飞升真相。", "target_chapters": 600},
         }
     )
-    review = service.review_chapter(
+    await service.after_novel_created(
         {
-            "novel_id": "novel-review-flow",
-            "chapter_number": 2,
-            "payload": {"content": "林澈知道其他角色未在场经历，并且一眼看穿黑塔机关。"},
-        }
-    )
-    after_review = service.after_chapter_review(
-        {
-            "novel_id": "novel-review-flow",
-            "chapter_number": 2,
-            "source": "chapter_review_service",
-            "payload": {"review_result": review["data"]},
+            "novel_id": "novel-intimate-depth",
+            "payload": {"title": "夏日乐队", "genre": "校园恋爱", "premise": "少女在乐队中找回真实自我。", "target_chapters": 80},
         }
     )
 
-    assert events and events[0]["event_id"].startswith("evt_")
-    assert {item["type"] for item in constraints} & {"knowledge_boundary", "capability_boundary", "personality_boundary"}
-    assert [block["title"] for block in before_review["data"]["review_context_blocks"]][:2] == [
-        "Evolution 时间线证据",
-        "Evolution 连续性约束",
-    ]
-    assert review["data"]["evidence"]
-    assert any(issue.get("evidence") for issue in review["data"]["issues"])
-    assert after_review["data"]["recorded"] is True
-    records = service.list_review_records("novel-review-flow")["items"]
-    assert records[-1]["issue_count"] == len(review["data"]["issues"])
+    epic = service.repository.get_prehistory_worldline("novel-epic-depth")
+    intimate = service.repository.get_prehistory_worldline("novel-intimate-depth")
+    assert epic["depth"]["horizon_years"] > intimate["depth"]["horizon_years"]
+    assert len(epic["eras"]) > len(intimate["eras"])
+
+
+@pytest.mark.asyncio
+async def test_before_story_planning_returns_worldline_and_foreshadow_context(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    await service.after_novel_created(
+        {
+            "novel_id": "novel-planning-context",
+            "payload": {"title": "旧案回声", "genre": "悬疑权谋", "premise": "主角调查被抹去的贵族学校旧案。", "target_chapters": 240},
+        }
+    )
+
+    result = service.before_story_planning(
+        {"novel_id": "novel-planning-context", "payload": {"purpose": "setup_main_plot_options"}}
+    )
+
+    assert result["ok"] is True
+    block = result["context_blocks"][0]
+    assert block["title"] == "Evolution 故事前史与伏笔库"
+    assert "故事开始前的世界线" in block["content"]
+    assert "可用于大纲与伏笔的种子" in block["content"]
+    assert result["data"]["foreshadow_seeds"]

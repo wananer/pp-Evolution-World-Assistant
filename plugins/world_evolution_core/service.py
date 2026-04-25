@@ -11,7 +11,7 @@ from plugins.platform.plugin_storage import PluginStorage
 
 from .context_patch import build_context_patch, render_patch_summary
 from .preset_converter import convert_st_preset
-from .repositories import RECENT_CONTEXT_FACT_LIMIT, EvolutionWorldRepository
+from .repositories import EvolutionWorldRepository
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
 PLUGIN_NAME = "world_evolution_core"
@@ -29,6 +29,97 @@ class EvolutionWorldAssistantService:
         self.jobs = jobs or PluginJobRegistry(self.storage)
         self.repository = repository or EvolutionWorldRepository(self.storage)
         self.extractor_provider = extractor_provider
+
+    async def after_novel_created(self, payload: dict[str, Any]) -> dict[str, Any]:
+        novel_id = str(payload.get("novel_id") or "").strip()
+        meta = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        if not novel_id:
+            return {"ok": True, "skipped": True, "reason": "missing novel_id"}
+
+        started_at = _now()
+        title = str(meta.get("title") or "").strip()
+        premise = str(meta.get("premise") or "").strip()
+        genre = str(meta.get("genre") or "").strip()
+        world_preset = str(meta.get("world_preset") or "").strip()
+        target_chapters = _int_or_none(meta.get("target_chapters"))
+        length_tier = str(meta.get("length_tier") or "").strip()
+        existing = self.repository.get_prehistory_worldline(novel_id)
+        worldline = _build_prehistory_worldline(
+            novel_id=novel_id,
+            title=title,
+            premise=premise,
+            genre=genre,
+            world_preset=world_preset,
+            target_chapters=target_chapters,
+            length_tier=length_tier,
+            at=started_at,
+        )
+        self.repository.save_prehistory_worldline(novel_id, worldline)
+        self.repository.append_event(
+            novel_id,
+            {
+                "type": "prehistory_worldline_seeded",
+                "horizon_years": worldline.get("depth", {}).get("horizon_years"),
+                "era_count": len(worldline.get("eras") or []),
+                "at": started_at,
+            },
+        )
+        self.repository.append_workflow_run(
+            novel_id,
+            {
+                "run_id": f"prehistory-{_hash_text(novel_id + started_at)}",
+                "hook_name": "after_novel_created",
+                "trigger_type": str(payload.get("trigger_type") or "novel_create"),
+                "status": "succeeded",
+                "started_at": started_at,
+                "finished_at": _now(),
+                "input": {
+                    "title": title,
+                    "genre": genre,
+                    "world_preset": world_preset,
+                    "target_chapters": target_chapters,
+                    "length_tier": length_tier,
+                },
+                "output": {
+                    "horizon_years": worldline.get("depth", {}).get("horizon_years"),
+                    "era_count": len(worldline.get("eras") or []),
+                    "foreshadow_seed_count": len(worldline.get("foreshadow_seeds") or []),
+                    "replaced_existing_worldline": bool(existing),
+                },
+            },
+        )
+        return {"ok": True, "data": {"worldline": worldline, "replaced_existing_worldline": bool(existing)}}
+
+    def before_story_planning(self, payload: dict[str, Any]) -> dict[str, Any]:
+        novel_id = str(payload.get("novel_id") or "").strip()
+        nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        purpose = str(nested.get("purpose") or payload.get("trigger_type") or "story_planning").strip()
+        if not novel_id:
+            return {"ok": True, "skipped": True, "reason": "missing novel_id"}
+
+        evidence = self.repository.build_story_planning_evidence(novel_id, purpose=purpose)
+        if not evidence:
+            return {"ok": True, "skipped": True, "reason": "no prehistory worldline yet"}
+
+        content = _render_story_planning_evidence(evidence)
+        return {
+            "ok": True,
+            "data": evidence,
+            "context_blocks": [
+                {
+                    "plugin_name": PLUGIN_NAME,
+                    "title": "Evolution 故事前史与伏笔库",
+                    "content": content,
+                    "priority": 72,
+                    "token_budget": 1600,
+                    "metadata": {
+                        "novel_id": novel_id,
+                        "purpose": purpose,
+                        "schema_version": evidence.get("worldline", {}).get("schema_version"),
+                    },
+                }
+            ],
+        }
 
     async def after_commit(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -58,7 +149,7 @@ class EvolutionWorldAssistantService:
             provider=self.extractor_provider,
         )
         snapshot = extraction.snapshot
-        known_names = [card.get("name") for card in self.repository.list_character_index(novel_id).get("items", [])]
+        known_names = [card.get("name") for card in self.repository.list_character_cards(novel_id).get("items", [])]
         for name in known_names:
             if name and name in content and name not in snapshot.characters:
                 snapshot.characters.append(name)
@@ -302,12 +393,8 @@ class EvolutionWorldAssistantService:
             return {"ok": True, "skipped": True, "reason": "missing novel_id/chapter_number/content"}
 
         evidence = self.repository.build_review_evidence(novel_id, content, before_chapter=chapter_number)
-        cards = evidence.get("characters") or self.repository.list_relevant_character_cards(novel_id, content).get("items", [])
-        facts = self.repository.list_fact_snapshots(
-            novel_id,
-            before_chapter=chapter_number,
-            limit=RECENT_CONTEXT_FACT_LIMIT,
-        )
+        cards = evidence.get("characters") or self.repository.list_character_cards(novel_id).get("items", [])
+        facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
         issues: list[dict[str, Any]] = []
         suggestions: list[str] = []
 
@@ -375,17 +462,272 @@ class EvolutionWorldAssistantService:
         return {"ok": True, "data": {"recorded": True, "chapter_number": chapter_number}}
 
     def build_context_patch(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> dict[str, Any]:
-        facts = self.repository.list_fact_snapshots(
-            novel_id,
-            before_chapter=chapter_number,
-            limit=RECENT_CONTEXT_FACT_LIMIT,
-        )
-        characters = self.repository.list_relevant_character_cards(novel_id, outline).get("items", [])
+        facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
+        characters = self.repository.list_character_cards(novel_id).get("items", [])
         return build_context_patch(novel_id, chapter_number, characters, facts, outline=outline)
 
     def build_context_summary(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> str:
         return render_patch_summary(self.build_context_patch(novel_id, chapter_number, outline=outline))
 
+
+def _build_prehistory_worldline(
+    *,
+    novel_id: str,
+    title: str,
+    premise: str,
+    genre: str,
+    world_preset: str,
+    target_chapters: Optional[int],
+    length_tier: str,
+    at: str,
+) -> dict[str, Any]:
+    profile = _select_worldline_profile(genre, world_preset, premise, target_chapters, length_tier)
+    axes = _infer_story_axes(genre, world_preset, premise)
+    forces = _build_world_forces(axes, profile)
+    eras = _build_prehistory_eras(profile, axes, forces, title)
+    seeds = _build_prehistory_foreshadow_seeds(profile, axes, forces)
+    guidance = _build_prehistory_guidance(profile, axes)
+    return {
+        "schema_version": 1,
+        "novel_id": novel_id,
+        "title": title,
+        "source": "deterministic_prehistory_generator",
+        "created_at": at,
+        "input_digest": _hash_text("|".join([title, genre, world_preset, premise, str(target_chapters or ""), length_tier])),
+        "depth": {
+            "tier": profile["tier"],
+            "label": profile["label"],
+            "horizon_years": profile["horizon_years"],
+            "era_count": profile["era_count"],
+            "detail_level": profile["detail_level"],
+            "reason": profile["reason"],
+        },
+        "story_axes": axes,
+        "eras": eras,
+        "forces": forces,
+        "foreshadow_seeds": seeds,
+        "planning_guidance": guidance,
+    }
+
+
+def _select_worldline_profile(
+    genre: str,
+    world_preset: str,
+    premise: str,
+    target_chapters: Optional[int],
+    length_tier: str,
+) -> dict[str, Any]:
+    text = " ".join([genre, world_preset, premise, length_tier]).lower()
+    epic_terms = ["玄幻", "修仙", "仙侠", "奇幻", "史诗", "神话", "王朝", "帝国", "科幻", "星际", "宇宙", "克苏鲁", "文明"]
+    complex_terms = ["悬疑", "推理", "权谋", "谍战", "战争", "末世", "赛博", "犯罪", "宫斗", "阴谋", "群像", "历史"]
+    intimate_terms = ["都市", "校园", "日常", "恋爱", "青春", "职场", "家庭", "轻喜", "现代"]
+    target = target_chapters or 100
+    if length_tier == "epic" or target >= 500 or any(term in text for term in epic_terms):
+        return {
+            "tier": "epic",
+            "label": "宏大长线",
+            "horizon_years": 3000 if target < 1000 else 10000,
+            "era_count": 6 if target < 1000 else 7,
+            "detail_level": "high",
+            "reason": "题材或篇幅需要跨文明/跨时代因果，前史必须提供制度、灾难与禁忌的长线来源。",
+        }
+    if target >= 200 or any(term in text for term in complex_terms):
+        return {
+            "tier": "complex",
+            "label": "复杂因果",
+            "horizon_years": 180,
+            "era_count": 5,
+            "detail_level": "medium_high",
+            "reason": "题材强调阴谋、制度或多方博弈，需要至少数代人的秘密、旧案和势力传承。",
+        }
+    if any(term in text for term in intimate_terms):
+        return {
+            "tier": "intimate",
+            "label": "近现代关系线",
+            "horizon_years": 12,
+            "era_count": 3,
+            "detail_level": "focused",
+            "reason": "题材更重人物关系和当代生活，前史以近年创伤、家庭/学校/职场制度和关系源头为主。",
+        }
+    return {
+        "tier": "standard",
+        "label": "标准长篇",
+        "horizon_years": 60,
+        "era_count": 4,
+        "detail_level": "medium",
+        "reason": "默认按中篇商业叙事处理，保留一代以上因果和开篇前夜的可用伏笔。",
+    }
+
+
+def _infer_story_axes(genre: str, world_preset: str, premise: str) -> list[str]:
+    text = " ".join([genre, world_preset, premise])
+    candidates = [
+        ("权力秩序", ["权", "王", "贵族", "组织", "公司", "帝国", "宗门", "学校"]),
+        ("禁忌知识", ["禁", "秘", "真相", "档案", "旧案", "研究", "知识", "黑箱"]),
+        ("资源争夺", ["资源", "灵气", "矿", "能源", "钥匙", "遗产", "名额", "土地"]),
+        ("身份伪装", ["伪装", "身份", "替身", "大小姐", "卧底", "假", "面具"]),
+        ("情感依赖", ["依赖", "爱", "亲吻", "拥抱", "家人", "青梅", "搭档", "守护"]),
+        ("异常觉醒", ["觉醒", "异能", "异常", "系统", "天赋", "魔法", "污染", "变异"]),
+        ("灾难余波", ["灾", "战争", "崩溃", "末世", "瘟疫", "事故", "袭击", "毁灭"]),
+    ]
+    axes = [name for name, terms in candidates if any(term in text for term in terms)]
+    if not axes:
+        axes = ["权力秩序", "人物欲望", "隐藏真相"]
+    elif len(axes) == 1:
+        axes.append("人物欲望")
+    return axes[:4]
+
+
+def _build_world_forces(axes: list[str], profile: dict[str, Any]) -> list[dict[str, str]]:
+    forces = []
+    for index, axis in enumerate(axes, start=1):
+        force_type = "institution" if axis in {"权力秩序", "身份伪装"} else "pressure"
+        forces.append(
+            {
+                "force_id": f"force_{index}",
+                "name": f"{axis}的既得利益者",
+                "type": force_type,
+                "desire": f"维持{axis}带来的优势，不允许开篇主线轻易揭开根因。",
+                "weakness": f"{axis}的历史断层或见不得光的交换条件。",
+                "planning_use": "可作为主线阻力、阶段反派或伏笔回收对象。",
+            }
+        )
+    if profile["tier"] in {"epic", "complex"}:
+        forces.append(
+            {
+                "force_id": "force_legacy",
+                "name": "旧时代残留机制",
+                "type": "legacy_system",
+                "desire": "继续按旧规则筛选幸存者、继承人或真相持有者。",
+                "weakness": "只要有人理解旧时代的代价，就能绕开表层秩序。",
+                "planning_use": "用于解释远古遗迹、秘密机构、旧案卷宗和终局反转。",
+            }
+        )
+    return forces
+
+
+def _build_prehistory_eras(
+    profile: dict[str, Any],
+    axes: list[str],
+    forces: list[dict[str, str]],
+    title: str,
+) -> list[dict[str, Any]]:
+    names = ["根源期", "制度成形期", "第一次创伤期", "秩序粉饰期", "暗流积累期", "开篇前夜", "未公开余波期"]
+    horizon = int(profile["horizon_years"])
+    count = int(profile["era_count"])
+    span = max(horizon // count, 1)
+    eras = []
+    for index in range(count):
+        starts = horizon - span * index
+        ends = max(horizon - span * (index + 1), 0)
+        axis = axes[index % len(axes)]
+        force = forces[index % len(forces)]
+        if index == count - 1:
+            time_label = "开篇前1年-第1章前"
+        else:
+            time_label = f"开篇前约{starts}-{ends}年"
+        eras.append(
+            {
+                "era_id": f"pre_{index + 1}",
+                "name": names[index],
+                "time_label": time_label,
+                "summary": _era_summary(names[index], axis, force.get("name", ""), title),
+                "causal_effect": f"把{axis}转化为开篇可见的压力，使主角面对的不是偶然麻烦，而是历史长期积累后的爆点。",
+                "planning_hooks": [
+                    f"用一件看似日常的小物/制度痕迹暗示{name_or_axis(names[index], axis)}。",
+                    f"让{force.get('name')}的行动暴露一条旧因果，但暂不解释全部真相。",
+                ],
+            }
+        )
+    return eras
+
+
+def _era_summary(era_name: str, axis: str, force_name: str, title: str) -> str:
+    subject = title or "本故事"
+    if era_name == "根源期":
+        return f"{subject}的核心矛盾在{axis}上首次成形，{force_name}掌握了最初的解释权。"
+    if era_name == "制度成形期":
+        return f"围绕{axis}形成稳定制度，公开规则保护秩序，隐藏规则保护少数人的收益。"
+    if era_name == "第一次创伤期":
+        return f"{axis}引发无法公开的事故、背叛或牺牲，成为后续人物命运的隐性债务。"
+    if era_name == "秩序粉饰期":
+        return f"旧创伤被改写成合理历史，幸存者、受益者和失语者被安排到不同位置。"
+    if era_name == "暗流积累期":
+        return f"被压住的证据和欲望重新靠近开篇人物，冲突开始从背景走向台前。"
+    return f"开篇前夜，各方围绕{axis}完成最后一次布置，主角即将撞上这条历史暗线。"
+
+
+def name_or_axis(name: str, axis: str) -> str:
+    return axis if name == "开篇前夜" else f"{name}的{axis}"
+
+
+def _build_prehistory_foreshadow_seeds(
+    profile: dict[str, Any],
+    axes: list[str],
+    forces: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    seeds = []
+    for index, axis in enumerate(axes, start=1):
+        force = forces[(index - 1) % len(forces)]
+        seeds.append(
+            {
+                "seed_id": f"seed_{index}",
+                "axis": axis,
+                "planting_form": f"开篇用一句异常称呼、一份残缺记录或一次不合常理的回避埋下{axis}。",
+                "surface_meaning": "读者初看只会认为这是世界观质感或人物习惯。",
+                "true_meaning": f"它指向{force.get('name')}在前史中留下的债务。",
+                "recommended_payoff": "中后期当主角掌握证据或付出代价后再解释完整因果。",
+            }
+        )
+    if profile["tier"] in {"epic", "complex"}:
+        seeds.append(
+            {
+                "seed_id": "seed_epoch_lie",
+                "axis": "历史谎言",
+                "planting_form": "让官方年表、家族传说或宗门记录出现一个无法同时成立的日期。",
+                "surface_meaning": "像是资料误差。",
+                "true_meaning": "旧时代被人为截断，某个关键事件发生时间被整体改写。",
+                "recommended_payoff": "用于卷末或部末反转，推动主线从个人冲突升级为世界结构冲突。",
+            }
+        )
+    return seeds
+
+
+def _build_prehistory_guidance(profile: dict[str, Any], axes: list[str]) -> list[str]:
+    guidance = [
+        "前史只提供因果压力，不替代正文选择；规划时应把它转化为角色目标、误判、代价和伏笔。",
+        f"当前前史深度为{profile['label']}：大纲中至少选择一条前史因果进入第一卷，一条保留到中后期回收。",
+        f"优先围绕{axes[0]}设计开篇钩子，让读者先看到结果，再逐步追溯原因。",
+    ]
+    if profile["tier"] in {"epic", "complex"}:
+        guidance.append("长线题材需要把旧时代因果拆成多次揭示：误导线索、阶段真相、终局真相不可一次说完。")
+    else:
+        guidance.append("近关系/现代题材不宜堆砌古老历史，重点让前史服务人物关系、家庭压力或制度惯性。")
+    return guidance
+
+
+def _render_story_planning_evidence(evidence: dict[str, Any]) -> str:
+    worldline = evidence.get("worldline") or {}
+    depth = worldline.get("depth") or {}
+    lines = [
+        f"前史深度：{depth.get('label', '未定')}；跨度：约{depth.get('horizon_years', 0)}年；原因：{depth.get('reason', '')}",
+    ]
+    if evidence.get("eras"):
+        lines.append("【故事开始前的世界线】")
+        for era in evidence["eras"]:
+            lines.append(f"- {era.get('time_label')}｜{era.get('name')}：{era.get('summary')} 因果作用：{era.get('causal_effect')}")
+    if evidence.get("forces"):
+        lines.append("【势力/制度因果】")
+        for force in evidence["forces"]:
+            lines.append(f"- {force.get('name')}：欲望={force.get('desire')}；弱点={force.get('weakness')}")
+    if evidence.get("foreshadow_seeds"):
+        lines.append("【可用于大纲与伏笔的种子】")
+        for seed in evidence["foreshadow_seeds"]:
+            lines.append(f"- {seed.get('axis')}：{seed.get('planting_form')} 真相={seed.get('true_meaning')}")
+    if evidence.get("planning_guidance"):
+        lines.append("【使用约束】")
+        lines.extend(f"- {item}" for item in evidence["planning_guidance"])
+    return "\n".join(line for line in lines if str(line).strip())
 
 
 def _character_is_mentioned(card: dict[str, Any], content: str) -> bool:
@@ -535,7 +877,6 @@ def _constraint(novel_id: str, chapter_number: int, constraint_type: str, subjec
     return {
         "constraint_id": "cc_" + _hash_text(seed)[:16],
         "novel_id": novel_id,
-        "chapter_number": chapter_number,
         "type": constraint_type,
         "subject": subject,
         "rule": rule[:260],
