@@ -11,7 +11,7 @@ from plugins.platform.plugin_storage import PluginStorage
 
 from .context_patch import build_context_patch, render_patch_summary
 from .preset_converter import convert_st_preset
-from .repositories import EvolutionWorldRepository
+from .repositories import RECENT_CONTEXT_FACT_LIMIT, EvolutionWorldRepository
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
 PLUGIN_NAME = "world_evolution_core"
@@ -58,7 +58,7 @@ class EvolutionWorldAssistantService:
             provider=self.extractor_provider,
         )
         snapshot = extraction.snapshot
-        known_names = [card.get("name") for card in self.repository.list_character_cards(novel_id).get("items", [])]
+        known_names = [card.get("name") for card in self.repository.list_character_index(novel_id).get("items", [])]
         for name in known_names:
             if name and name in content and name not in snapshot.characters:
                 snapshot.characters.append(name)
@@ -265,8 +265,12 @@ class EvolutionWorldAssistantService:
         if not novel_id or not chapter_number or not content:
             return {"ok": True, "skipped": True, "reason": "missing novel_id/chapter_number/content"}
 
-        cards = self.repository.list_character_cards(novel_id).get("items", [])
-        facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
+        cards = self.repository.list_relevant_character_cards(novel_id, content).get("items", [])
+        facts = self.repository.list_fact_snapshots(
+            novel_id,
+            before_chapter=chapter_number,
+            limit=RECENT_CONTEXT_FACT_LIMIT,
+        )
         issues: list[dict[str, Any]] = []
         suggestions: list[str] = []
 
@@ -301,8 +305,12 @@ class EvolutionWorldAssistantService:
         }
 
     def build_context_patch(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> dict[str, Any]:
-        facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
-        characters = self.repository.list_character_cards(novel_id).get("items", [])
+        facts = self.repository.list_fact_snapshots(
+            novel_id,
+            before_chapter=chapter_number,
+            limit=RECENT_CONTEXT_FACT_LIMIT,
+        )
+        characters = self.repository.list_relevant_character_cards(novel_id, outline).get("items", [])
         return build_context_patch(novel_id, chapter_number, characters, facts, outline=outline)
 
     def build_context_summary(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> str:

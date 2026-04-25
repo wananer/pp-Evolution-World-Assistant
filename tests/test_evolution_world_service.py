@@ -45,6 +45,72 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_evolution_state_is_partitioned_into_plugin_database_records(tmp_path):
+    import sqlite3
+
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-db-a",
+            "chapter_number": 1,
+            "payload": {"content": "《林澈》抵达雾城。"},
+        }
+    )
+    await service.after_commit(
+        {
+            "novel_id": "novel-db-b",
+            "chapter_number": 1,
+            "payload": {"content": "《沈月》进入星港。"},
+        }
+    )
+
+    assert (tmp_path / "plugin_platform.db").exists()
+    assert not (tmp_path / "world_evolution_core" / "novels" / "novel-db-a" / "characters.json").exists()
+    assert not (tmp_path / "world_evolution_core" / "novels" / "novel-db-a" / "facts" / "chapter_1.json").exists()
+    assert service.get_character("novel-db-a", "林澈") is not None
+    assert service.get_character("novel-db-a", "沈月") is None
+
+    conn = sqlite3.connect(tmp_path / "plugin_platform.db")
+    rows = conn.execute(
+        """
+        SELECT novel_id, scope, chapter_number, entity_id
+        FROM plugin_state
+        WHERE plugin_name = 'world_evolution_core'
+        ORDER BY novel_id, scope
+        """
+    ).fetchall()
+    conn.close()
+
+    assert any(row[0] == "novel-db-a" and row[1].startswith("novels/novel-db-a/characters/") and row[3] for row in rows)
+    assert any(row[0] == "novel-db-b" and row[1].startswith("novels/novel-db-b/characters/") and row[3] for row in rows)
+    assert all(row[0] != "novel-db-a" or "novel-db-b" not in row[1] for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_context_patch_reads_recent_fact_window_from_database(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.manual_rebuild(
+        {
+            "novel_id": "novel-window",
+            "chapters": [
+                {"number": number, "content": f"《林澈》在雾城调查第{number}枚黑色钥匙。"}
+                for number in range(1, 21)
+            ],
+        }
+    )
+
+    context = service.before_context_build({"novel_id": "novel-window", "chapter_number": 21})
+
+    recent_facts = next(block for block in context["context_patch"]["blocks"] if block["id"] == "recent_facts")
+    assert [item["chapter_number"] for item in recent_facts["items"]] == [16, 17, 18, 19, 20]
+    assert "第1章" not in recent_facts["content"]
+
+
+@pytest.mark.asyncio
 async def test_manual_rebuild_replays_chapter_payloads(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))

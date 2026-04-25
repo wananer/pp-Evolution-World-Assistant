@@ -1,6 +1,7 @@
 """Database-backed repositories for Evolution World plugin state."""
 from __future__ import annotations
 
+from hashlib import sha256
 from typing import Any, Optional, Union, Tuple
 
 from plugins.platform.plugin_storage import PluginStorage
@@ -8,6 +9,8 @@ from plugins.platform.plugin_storage import PluginStorage
 from .models import ChapterFactSnapshot, CharacterCard
 
 PLUGIN_NAME = "world_evolution_core"
+RECENT_CONTEXT_FACT_LIMIT = 12
+RECENT_CONTEXT_CHARACTER_LIMIT = 80
 
 
 class EvolutionWorldRepository:
@@ -32,24 +35,35 @@ class EvolutionWorldRepository:
         )
         return data if isinstance(data, dict) else None
 
-    def list_fact_snapshots(self, novel_id: str, before_chapter: Optional[int] = None) -> list[dict[str, Any]]:
+    def list_fact_snapshots(
+        self,
+        novel_id: str,
+        before_chapter: Optional[int] = None,
+        *,
+        limit: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
         items = []
-        for data in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "facts"]):
+        rows = self.storage.list_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "facts"],
+            limit=limit,
+            reverse=limit is not None,
+            before_chapter=before_chapter,
+        )
+        for data in rows:
             if not isinstance(data, dict):
                 continue
             chapter_number = _int_or_none(data.get("chapter_number"))
-            if before_chapter and chapter_number and chapter_number >= before_chapter:
+            if before_chapter and (not chapter_number or chapter_number >= before_chapter):
                 continue
             items.append(data)
         return sorted(items, key=lambda item: int(item.get("chapter_number") or 0))
 
     def upsert_character_cards(self, novel_id: str, snapshot: ChapterFactSnapshot, character_updates: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
-        cards = self.list_character_cards(novel_id)["items"]
-        by_name = {card.get("name"): _ensure_character_defaults(card) for card in cards}
         updates_by_name = {item.get("name"): item for item in (character_updates or []) if item.get("name")}
         updated = []
         for name in snapshot.characters:
-            current = by_name.get(name) or CharacterCard(
+            current = self.get_character_card(novel_id, name) or CharacterCard(
                 character_id=_slug(name),
                 name=name,
                 first_seen_chapter=snapshot.chapter_number,
@@ -72,10 +86,8 @@ class EvolutionWorldRepository:
                     }
                 )
                 current["recent_events"] = current["recent_events"][-8:]
-            by_name[name] = current
+            self.write_character_card(novel_id, current)
             updated.append(current)
-        next_cards = sorted(by_name.values(), key=lambda item: (item.get("first_seen_chapter") or 0, item.get("name") or ""))
-        self.write_character_cards(novel_id, next_cards)
         return updated
 
     def rebuild_character_cards_from_facts(self, novel_id: str) -> list[dict[str, Any]]:
@@ -114,12 +126,84 @@ class EvolutionWorldRepository:
         return next_cards
 
     def write_character_cards(self, novel_id: str, cards: list[dict[str, Any]]) -> None:
-        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "characters.json"], {"items": cards})
+        self.storage.delete_json_prefix(PLUGIN_NAME, ["novels", novel_id, "characters"])
+        prepared_cards = [self._prepare_character_card(card) for card in cards if isinstance(card, dict)]
+        for card in prepared_cards:
+            self.storage.write_json(
+                PLUGIN_NAME,
+                ["novels", novel_id, "characters", f"{card['character_id']}.json"],
+                card,
+            )
+        self._write_character_index(novel_id, prepared_cards)
 
-    def list_character_cards(self, novel_id: str) -> dict[str, Any]:
-        return self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "characters.json"], default={"items": []})
+    def write_character_card(self, novel_id: str, card: dict[str, Any]) -> dict[str, Any]:
+        prepared = self._prepare_character_card(card)
+        self.storage.write_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "characters", f"{prepared['character_id']}.json"],
+            prepared,
+        )
+        self._upsert_character_index_entry(novel_id, prepared)
+        return prepared
+
+    def list_character_cards(
+        self,
+        novel_id: str,
+        *,
+        limit: Optional[int] = None,
+        recent_first: bool = False,
+    ) -> dict[str, Any]:
+        cards = [
+            _ensure_character_defaults(dict(item))
+            for item in self.storage.list_json(
+                PLUGIN_NAME,
+                ["novels", novel_id, "characters"],
+                limit=limit,
+                reverse=recent_first,
+            )
+            if isinstance(item, dict)
+        ]
+        if cards:
+            if not recent_first:
+                cards = sorted(cards, key=lambda item: (item.get("first_seen_chapter") or 0, item.get("name") or ""))
+            return {"items": cards}
+        legacy = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "characters.json"], default={"items": []})
+        return legacy if isinstance(legacy, dict) and isinstance(legacy.get("items"), list) else {"items": []}
+
+    def list_character_index(self, novel_id: str) -> dict[str, Any]:
+        index = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "characters_index.json"], default={"items": []})
+        if isinstance(index, dict) and isinstance(index.get("items"), list):
+            return index
+        cards = self.list_character_cards(novel_id).get("items", [])
+        return {"items": [_character_index_entry(card) for card in cards]}
+
+    def list_relevant_character_cards(self, novel_id: str, text: str = "", *, limit: int = RECENT_CONTEXT_CHARACTER_LIMIT) -> dict[str, Any]:
+        by_id: dict[str, dict[str, Any]] = {}
+        for card in self.list_character_cards(novel_id, limit=limit, recent_first=True).get("items", []):
+            if card.get("character_id"):
+                by_id[str(card["character_id"])] = card
+        text = str(text or "")
+        if text:
+            for entry in self.list_character_index(novel_id).get("items", []):
+                names = [entry.get("name"), *(entry.get("aliases") or [])]
+                if any(str(name or "").strip() and str(name).strip() in text for name in names):
+                    card = self.get_character_card(novel_id, str(entry.get("character_id") or entry.get("name") or ""))
+                    if card and card.get("character_id"):
+                        by_id[str(card["character_id"])] = card
+        cards = list(by_id.values())
+        return {"items": sorted(cards, key=lambda item: (item.get("first_seen_chapter") or 0, item.get("name") or ""))}
 
     def get_character_card(self, novel_id: str, character_id: str) -> Optional[dict[str, Any]]:
+        try:
+            card = self.storage.read_json(
+                PLUGIN_NAME,
+                ["novels", novel_id, "characters", f"{character_id}.json"],
+                default=None,
+            )
+        except ValueError:
+            card = None
+        if isinstance(card, dict):
+            return _ensure_character_defaults(card)
         for card in self.list_character_cards(novel_id)["items"]:
             if card.get("character_id") == character_id or card.get("name") == character_id:
                 return card
@@ -149,6 +233,28 @@ class EvolutionWorldRepository:
             return self.storage.delete_json(PLUGIN_NAME, scope)
         except ValueError:
             return False
+
+    def _prepare_character_card(self, card: dict[str, Any]) -> dict[str, Any]:
+        prepared = _ensure_character_defaults(dict(card))
+        if not prepared.get("character_id"):
+            prepared["character_id"] = _slug(str(prepared.get("name") or "character"))
+        prepared["character_id"] = _safe_record_id(str(prepared["character_id"]))
+        return prepared
+
+    def _write_character_index(self, novel_id: str, cards: list[dict[str, Any]]) -> None:
+        self.storage.write_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "characters_index.json"],
+            {"items": [_character_index_entry(card) for card in cards]},
+        )
+
+    def _upsert_character_index_entry(self, novel_id: str, card: dict[str, Any]) -> None:
+        index = self.list_character_index(novel_id)
+        entry = _character_index_entry(card)
+        items = [item for item in index.get("items", []) if item.get("character_id") != entry["character_id"]]
+        items.append(entry)
+        items.sort(key=lambda item: (item.get("first_seen_chapter") or 0, item.get("name") or ""))
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "characters_index.json"], {"items": items})
 
 
 def _ensure_character_defaults(card: dict[str, Any]) -> dict[str, Any]:
@@ -369,7 +475,29 @@ def _int_or_none(value: Any) -> Optional[int]:
 
 
 def _slug(value: str) -> str:
-    return "c_" + str(abs(hash(value)))
+    return "c_" + sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+def _safe_record_id(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return _slug("character")
+    try:
+        PluginStorage._safe_segment(text)
+        return text
+    except ValueError:
+        return _slug(text)
+
+
+def _character_index_entry(card: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "character_id": card.get("character_id") or _slug(str(card.get("name") or "character")),
+        "name": card.get("name") or "",
+        "aliases": list(card.get("aliases") or [])[:8],
+        "first_seen_chapter": card.get("first_seen_chapter"),
+        "last_seen_chapter": card.get("last_seen_chapter"),
+        "status": card.get("status") or "active",
+    }
 
 
 def _character_event_summary(name: str, snapshot: ChapterFactSnapshot) -> str:
