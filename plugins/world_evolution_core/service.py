@@ -9,6 +9,7 @@ from typing import Any, Optional, Union, Tuple
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
+from .continuity import build_chapter_summary, build_volume_summary
 from .context_patch import build_context_patch, render_patch_summary
 from .preset_converter import convert_st_preset
 from .repositories import EvolutionWorldRepository
@@ -154,12 +155,20 @@ class EvolutionWorldAssistantService:
             provider=self.extractor_provider,
         )
         snapshot = extraction.snapshot
+        chapter_summary = build_chapter_summary(novel_id, chapter_number, content, _now())
         known_names = [card.get("name") for card in self.repository.list_character_cards(novel_id).get("items", [])]
         for name in known_names:
             if name and name in content and name not in snapshot.characters:
                 snapshot.characters.append(name)
         previous_snapshot = self.repository.get_fact_snapshot(novel_id, chapter_number)
         self.repository.save_fact_snapshot(snapshot)
+        self.repository.save_chapter_summary(novel_id, chapter_number, chapter_summary)
+        volume_summary = None
+        if chapter_number % 10 == 0:
+            volume_index = chapter_number // 10
+            recent_summaries = self.repository.list_chapter_summaries(novel_id, limit=10)
+            volume_summary = build_volume_summary(novel_id, volume_index, recent_summaries, _now())
+            self.repository.save_volume_summary(novel_id, volume_index, volume_summary)
         updated_cards = self.repository.upsert_character_cards(
             novel_id,
             snapshot,
@@ -198,6 +207,8 @@ class EvolutionWorldAssistantService:
                     "warnings": extraction.warnings,
                     "characters_updated": [card.get("character_id") for card in updated_cards],
                     "replaced_existing_snapshot": bool(previous_snapshot),
+                    "chapter_summary_saved": True,
+                    "volume_summary_saved": bool(volume_summary),
                 },
             },
         )
@@ -214,11 +225,21 @@ class EvolutionWorldAssistantService:
                 input_json={"chapter_number": chapter_number},
                 output_json={
                     "facts_path": f"facts/chapter_{chapter_number}.json",
+                    "summary_path": f"summaries/chapters/chapter_{chapter_number}.json",
                     "characters_updated": [card.get("character_id") for card in updated_cards],
                 },
             )
         )
-        return {"ok": True, "data": {"facts": snapshot.to_dict(), "characters_updated": updated_cards, "extraction": extraction.to_dict()}}
+        return {
+            "ok": True,
+            "data": {
+                "facts": snapshot.to_dict(),
+                "chapter_summary": chapter_summary,
+                "volume_summary": volume_summary,
+                "characters_updated": updated_cards,
+                "extraction": extraction.to_dict(),
+            },
+        }
 
     def before_context_build(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -314,6 +335,7 @@ class EvolutionWorldAssistantService:
             return {"ok": False, "error": "missing novel_id/chapter_number"}
 
         removed = self.repository.delete_fact_snapshot(novel_id, chapter_number)
+        self.repository.delete_chapter_summary(novel_id, chapter_number)
         cards = self.repository.rebuild_character_cards_from_facts(novel_id)
         event = {
             "type": "chapter_rollback",
@@ -469,7 +491,17 @@ class EvolutionWorldAssistantService:
     def build_context_patch(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> dict[str, Any]:
         facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
         characters = self.repository.list_character_cards(novel_id).get("items", [])
-        return build_context_patch(novel_id, chapter_number, characters, facts, outline=outline)
+        chapter_summaries = self.repository.list_chapter_summaries(novel_id, before_chapter=chapter_number, limit=10)
+        volume_summaries = self.repository.list_volume_summaries(novel_id, before_chapter=chapter_number, limit=3)
+        return build_context_patch(
+            novel_id,
+            chapter_number,
+            characters,
+            facts,
+            outline=outline,
+            chapter_summaries=chapter_summaries,
+            volume_summaries=volume_summaries,
+        )
 
     def build_context_summary(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> str:
         return render_patch_summary(self.build_context_patch(novel_id, chapter_number, outline=outline))

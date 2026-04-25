@@ -13,17 +13,22 @@ def build_context_patch(
     facts: list[dict[str, Any]],
     *,
     outline: str = "",
+    chapter_summaries: Optional[list[dict[str, Any]]] = None,
+    volume_summaries: Optional[list[dict[str, Any]]] = None,
     max_characters: int = 8,
     max_facts: int = 5,
 ) -> dict[str, Any]:
     recent_facts = facts[-max_facts:]
+    recent_summaries = (chapter_summaries or [])[-10:]
+    recent_volumes = (volume_summaries or [])[-3:]
     selection = _select_characters(characters, max_characters, outline=outline, recent_facts=recent_facts)
     focus_characters = selection["focus"]
     background_characters = selection["background"]
     offstage_characters = selection["offstage"]
     blocks = []
 
-    if focus_characters:
+    state_board = _render_state_board(recent_summaries, recent_volumes)
+    if state_board:
         blocks.append(
             {
                 "id": "evolution_usage_protocol",
@@ -35,6 +40,31 @@ def build_context_patch(
                 "items": [],
             }
         )
+        blocks.append(
+            {
+                "id": "chapter_state_bridge",
+                "title": "章节承接状态",
+                "kind": "chapter_state_bridge",
+                "priority": 82,
+                "token_budget": 520,
+                "content": state_board,
+                "items": {"chapters": recent_summaries[-3:], "volumes": recent_volumes[-1:]},
+            }
+        )
+
+    if focus_characters:
+        if not state_board:
+            blocks.append(
+                {
+                    "id": "evolution_usage_protocol",
+                    "title": "Evolution 使用方式",
+                    "kind": "usage_protocol",
+                    "priority": 78,
+                    "token_budget": 120,
+                    "content": _render_usage_protocol(),
+                    "items": [],
+                }
+            )
         blocks.append(
             {
                 "id": "focus_characters",
@@ -174,6 +204,7 @@ def _extract_context_terms(text: str) -> list[str]:
 def _render_usage_protocol() -> str:
     return (
         "以下内容是角色连续性参考，不是本章任务清单；不要逐条复述，也不要为使用这些信息强行安排情节。"
+        "章节承接状态是硬约束：下一章开头必须承接上一章结尾；若跳时空，需要先交代过渡。"
         "硬边界用于避免逻辑越界；软倾向只影响选择风格；可变状态可在本章新证据刺激下自然更新。"
     )
 
@@ -327,8 +358,67 @@ def _render_facts(facts: list[dict[str, Any]]) -> str:
     for fact in facts:
         locations = "、".join(fact.get("locations") or [])
         location_suffix = f" 地点：{locations}" if locations else ""
-        lines.append(f"- 第{fact.get('chapter_number')}章：{_clean_display_text(fact.get('summary') or '')}{location_suffix}")
+        summary = _clean_display_text(fact.get("summary") or "")[:220]
+        lines.append(f"- 第{fact.get('chapter_number')}章：{summary}{location_suffix}")
     return "\n".join(lines)
+
+
+def _render_state_board(chapter_summaries: list[dict[str, Any]], volume_summaries: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    if volume_summaries:
+        volume = volume_summaries[-1]
+        volume_text = _clean_display_text(volume.get("short_summary") or "")[-420:]
+        open_threads = _join_limited(volume.get("open_threads"), 4)
+        lines.append(f"最近10章大总结（第{volume.get('chapter_start')}-{volume.get('chapter_end')}章）：{volume_text}")
+        if open_threads:
+            lines.append(f"大线索未决：{open_threads}")
+    if chapter_summaries:
+        latest = chapter_summaries[-1]
+        carry = latest.get("carry_forward") if isinstance(latest.get("carry_forward"), dict) else {}
+        ending = latest.get("ending_state") if isinstance(latest.get("ending_state"), dict) else {}
+        lines.append(f"上一章小总结（第{latest.get('chapter_number')}章）：{_clean_display_text(latest.get('short_summary') or '')[:360]}")
+        time = _clean_display_text(carry.get("last_known_time") or "")
+        locations = _join_limited(carry.get("last_known_locations"), 4)
+        characters = _join_limited(carry.get("onscreen_characters"), 6)
+        object_states = _render_object_states(carry.get("object_states"))
+        open_threads = _join_limited(carry.get("open_threads"), 3)
+        pieces = []
+        if time:
+            pieces.append(f"时间={time}")
+        if locations:
+            pieces.append(f"地点={locations}")
+        if characters:
+            pieces.append(f"在场/相关角色={characters}")
+        if object_states:
+            pieces.append(f"物件状态={object_states}")
+        if open_threads:
+            pieces.append(f"未决问题={open_threads}")
+        ending_excerpt = _clean_display_text(ending.get("excerpt") or "")[:220]
+        lines.append("上一章结尾状态：" + ("；".join(pieces) if pieces else "未抽取到明确时间/地点/物件，请优先根据上一章结尾证据承接。"))
+        if ending_excerpt:
+            lines.append(f"结尾证据：{ending_excerpt}")
+        lines.append(str(carry.get("required_next_bridge") or "下一章开头必须承接上一章结尾，避免状态重置。"))
+    if len(chapter_summaries) > 1:
+        recent = []
+        for item in chapter_summaries[-3:-1]:
+            recent.append(f"第{item.get('chapter_number')}章：{_clean_display_text(item.get('short_summary') or '')[:180]}")
+        if recent:
+            lines.append("近期小总结：" + " / ".join(recent))
+    return "\n".join(line for line in lines if line)
+
+
+def _render_object_states(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    parts = []
+    for item in value[:5]:
+        if not isinstance(item, dict):
+            continue
+        obj = _clean_display_text(item.get("object") or "")
+        snippet = _clean_display_text(item.get("snippet") or "")
+        if obj and snippet:
+            parts.append(f"{obj}:{snippet[:80]}")
+    return "；".join(parts)
 
 
 def _build_risks(characters: list[dict[str, Any]], facts: list[dict[str, Any]], background_characters: Optional[list[dict[str, Any]]] = None) -> list[str]:

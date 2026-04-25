@@ -1,5 +1,6 @@
 import pytest
 
+from plugins.world_evolution_core.continuity import analyze_chapter_transitions
 from plugins.world_evolution_core.service import EvolutionWorldAssistantService
 from plugins.platform.job_registry import PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
@@ -40,8 +41,46 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     patch = context["context_patch"]
     assert patch["merge_strategy"] == "append_by_priority"
     assert patch["estimated_token_budget"] > 0
-    assert [block["id"] for block in patch["blocks"]][:3] == ["evolution_usage_protocol", "focus_characters", "recent_facts"]
-    assert patch["blocks"][1]["kind"] == "focus_character_state"
+    assert [block["id"] for block in patch["blocks"]][:4] == [
+        "evolution_usage_protocol",
+        "chapter_state_bridge",
+        "focus_characters",
+        "recent_facts",
+    ]
+    assert patch["blocks"][1]["kind"] == "chapter_state_bridge"
+    assert patch["blocks"][2]["kind"] == "focus_character_state"
+    assert "上一章小总结" in content
+    assert "下一章开头必须承接上一章结尾" in content
+
+
+@pytest.mark.asyncio
+async def test_after_commit_writes_chapter_and_volume_summaries(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    for chapter in range(1, 11):
+        await service.after_commit(
+            {
+                "novel_id": "novel-summary",
+                "chapter_number": chapter,
+                "payload": {"content": f"《林澈》进入雾城第{chapter}区，发现黑塔线索。结尾时林澈留在黑塔门前，问题还没有答案。"},
+            }
+        )
+
+    chapter_summaries = service.repository.list_chapter_summaries("novel-summary", limit=20)
+    volume_summaries = service.repository.list_volume_summaries("novel-summary", limit=20)
+
+    assert len(chapter_summaries) == 10
+    assert chapter_summaries[-1]["carry_forward"]["required_next_bridge"]
+    assert len(volume_summaries) == 1
+    assert volume_summaries[0]["chapter_start"] == 1
+    assert volume_summaries[0]["chapter_end"] == 10
+
+    context = service.before_context_build({"novel_id": "novel-summary", "chapter_number": 11})
+    content = context["context_blocks"][0]["content"]
+    assert "最近10章大总结" in content
+    assert "上一章小总结" in content
+    assert "上一章结尾状态" in content
 
 
 @pytest.mark.asyncio
@@ -613,6 +652,35 @@ def test_review_chapter_allows_explained_cognition_transition(tmp_path):
     issue_types = {item["issue_type"] for item in result["data"]["issues"]}
     assert "evolution_character_cognition" not in issue_types
     assert "evolution_character_capability" not in issue_types
+
+
+def test_transition_analysis_flags_repeated_arrival_time_and_object_conflicts():
+    result = analyze_chapter_transitions(
+        [
+            {
+                "chapter_number": 1,
+                "content": "沈砚进入C307，找到黑匣子并播放第一段录音。结尾时沈砚离开C307。",
+            },
+            {
+                "chapter_number": 2,
+                "content": "沈砚在宿舍区走了十分钟，才找到C307。他把黑匣子放在桌上。",
+            },
+            {
+                "chapter_number": 3,
+                "content": "演习结束的警报响起。沈砚把黑匣子锁进书桌抽屉，随后离开宿舍区。",
+            },
+            {
+                "chapter_number": 4,
+                "content": "沈砚在C区避难点等待广播通知演习结束，随后从帆布包里取出黑匣子。",
+            },
+        ]
+    )
+
+    conflict_types = {item["type"] for item in result["conflicts"]}
+    assert "repeated_arrival" in conflict_types
+    assert "time_rollback" in conflict_types
+    assert "object_teleport" in conflict_types
+    assert result["aggregate"]["hard_conflict_count"] >= 3
 
 
 @pytest.mark.asyncio
