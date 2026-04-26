@@ -218,6 +218,12 @@ class EvolutionWorldRepository:
     def list_review_records(self, novel_id: str, limit: int = 30) -> list[dict[str, Any]]:
         return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "timeline", "review_records.jsonl"], limit=limit)
 
+    def append_context_injection_record(self, novel_id: str, record: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "context", "injection_records.jsonl"], record)
+
+    def list_context_injection_records(self, novel_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "context", "injection_records.jsonl"], limit=limit)
+
     def build_review_evidence(
         self,
         novel_id: str,

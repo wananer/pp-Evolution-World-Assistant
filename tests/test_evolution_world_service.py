@@ -84,6 +84,61 @@ async def test_after_commit_writes_chapter_and_volume_summaries(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_context_patch_records_capsule_audit(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-capsule-audit",
+            "chapter_number": 1,
+            "payload": {"content": "《林澈》进入C307，找到黑匣子。结尾时林澈留在C307内部。"},
+        }
+    )
+
+    context = service.before_context_build({"novel_id": "novel-capsule-audit", "chapter_number": 2})
+
+    assert context["ok"] is True
+    patch = context["context_patch"]
+    assert patch["blocks"]
+    for block in patch["blocks"]:
+        assert block["capsule_id"].startswith("cap_")
+        assert block["content_hash"].startswith("sha256:")
+        assert block["semantic_key"]
+        assert block["capsule"]["content_hash"] == block["content_hash"]
+
+    record = context["context_injection_record"]
+    assert record["selected_count"] == len(patch["blocks"])
+    assert record["estimated_token_budget"] == patch["estimated_token_budget"]
+    saved_records = service.repository.list_context_injection_records("novel-capsule-audit")
+    assert saved_records[-1]["selected"][0]["content_hash"].startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_context_patch_dedupes_stable_protocol_but_keeps_handoff(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-context-dedupe",
+            "chapter_number": 1,
+            "payload": {"content": "《沈砚》进入C307，拿起黑匣子。结尾时沈砚仍在C307内部观察墙面划痕。"},
+        }
+    )
+
+    first = service.before_context_build({"novel_id": "novel-context-dedupe", "chapter_number": 2})
+    second = service.before_context_build({"novel_id": "novel-context-dedupe", "chapter_number": 2})
+
+    assert any(block["id"] == "evolution_usage_protocol" for block in first["context_patch"]["blocks"])
+    assert not any(block["id"] == "evolution_usage_protocol" for block in second["context_patch"]["blocks"])
+    assert any(block["id"] == "chapter_state_bridge" for block in second["context_patch"]["blocks"])
+    assert "上一章结尾状态" in second["context_blocks"][0]["content"]
+    assert any(item["reason"] == "stable_protocol_already_injected" for item in second["context_patch"]["skipped_blocks"])
+    assert len(service.repository.list_context_injection_records("novel-context-dedupe")) == 2
+
+
+@pytest.mark.asyncio
 async def test_after_commit_extracts_unquoted_chinese_character_names(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))

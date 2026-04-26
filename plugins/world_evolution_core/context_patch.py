@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from .context_capsules import enrich_blocks_with_capsules
+
 PLUGIN_NAME = "world_evolution_core"
 
 
@@ -15,6 +17,7 @@ def build_context_patch(
     outline: str = "",
     chapter_summaries: Optional[list[dict[str, Any]]] = None,
     volume_summaries: Optional[list[dict[str, Any]]] = None,
+    previous_injections: Optional[list[dict[str, Any]]] = None,
     max_characters: int = 8,
     max_facts: int = 5,
 ) -> dict[str, Any]:
@@ -117,6 +120,13 @@ def build_context_patch(
             }
         )
 
+    blocks, skipped_blocks = enrich_blocks_with_capsules(
+        blocks,
+        novel_id=novel_id,
+        chapter_number=chapter_number,
+        previous_records=previous_injections,
+    )
+
     return {
         "plugin_name": PLUGIN_NAME,
         "novel_id": novel_id,
@@ -124,6 +134,7 @@ def build_context_patch(
         "schema_version": 1,
         "merge_strategy": "append_by_priority",
         "blocks": blocks,
+        "skipped_blocks": skipped_blocks,
         "estimated_token_budget": sum(int(block.get("token_budget") or 0) for block in blocks),
     }
 
