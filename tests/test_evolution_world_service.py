@@ -1,5 +1,6 @@
 import pytest
 
+from plugins.world_evolution_core import service as evolution_service_module
 from plugins.world_evolution_core.continuity import analyze_chapter_transitions
 from plugins.world_evolution_core.service import EvolutionWorldAssistantService
 from plugins.platform.job_registry import PluginJobRegistry
@@ -23,6 +24,14 @@ class FakeControlCardLLM:
     async def generate(self, prompt, config):
         self.calls.append({"prompt": prompt, "config": config})
         return FakeControlCardResult("【承接】沈砚已经在C307内部。\n【禁写】不要重复进入C307，不要使用没有说话。")
+
+    async def stream_generate(self, prompt, config):
+        yield "unused"
+
+
+class FakeConnectionLLM:
+    async def generate(self, prompt, config):
+        return FakeControlCardResult("OK")
 
     async def stream_generate(self, prompt, config):
         yield "unused"
@@ -264,6 +273,80 @@ async def test_api2_control_card_setting_compresses_context_inside_evolution(tmp
     records = service.repository.list_context_control_card_records("novel-api2")
     assert records[-1]["provider_mode"] == "custom"
     assert records[-1]["token_usage"]["total_tokens"] == 168
+
+
+@pytest.mark.asyncio
+async def test_api2_model_fetch_uses_saved_custom_key_without_exposing_it(tmp_path, monkeypatch):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.update_settings(
+        {
+            "api2_control_card": {
+                "provider_mode": "custom",
+                "custom_profile": {
+                    "protocol": "openai",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "stored-secret",
+                },
+            }
+        }
+    )
+    calls = []
+
+    async def fake_fetch_model_items(request):
+        calls.append(request)
+        return [
+            {"id": "model-a", "name": "model-a", "owned_by": "gateway"},
+            {"id": "model-b", "name": "model-b", "owned_by": "gateway"},
+        ]
+
+    monkeypatch.setattr(evolution_service_module, "_fetch_api2_model_items", fake_fetch_model_items)
+
+    result = await service.fetch_api2_models(
+        {
+            "provider_mode": "custom",
+            "custom_profile": {
+                "protocol": "openai",
+                "base_url": "https://api.example.test/v1",
+                "api_key": "",
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["count"] == 2
+    assert [item["id"] for item in result["items"]] == ["model-a", "model-b"]
+    assert calls[0]["api_key"] == "stored-secret"
+    assert "stored-secret" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_api2_connection_test_uses_current_form_values(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        api2_llm_service=FakeConnectionLLM(),
+    )
+
+    result = await service.test_api2_connection(
+        {
+            "api2_control_card": {
+                "provider_mode": "custom",
+                "custom_profile": {
+                    "protocol": "openai",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "typed-secret",
+                    "model": "deepseek-test-model",
+                },
+            }
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["model"] == "deepseek-test-model"
+    assert result["preview"] == "OK"
+    assert "typed-secret" not in str(result)
 
 
 def test_api2_settings_preserves_custom_key_when_update_leaves_key_blank(tmp_path):

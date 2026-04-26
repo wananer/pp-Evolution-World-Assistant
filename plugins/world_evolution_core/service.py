@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from hashlib import sha256
 from typing import Any, Optional, Union, Tuple
+from urllib.parse import urlparse, urlunparse
 
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
@@ -50,6 +51,50 @@ class EvolutionWorldAssistantService:
         settings = _normalize_settings(payload or {}, existing=existing)
         self.repository.save_settings(settings)
         return self.get_settings(safe=True)
+
+    async def fetch_api2_models(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Fetch model names for the API2 settings form without exposing stored keys."""
+        request = _build_api2_models_request(payload, self.get_settings(safe=False))
+        items = await _fetch_api2_model_items(request)
+        return {
+            "ok": True,
+            "items": items,
+            "count": len(items),
+            "source": request["source"],
+            "protocol": request["protocol"],
+        }
+
+    async def test_api2_connection(self, payload: dict[str, Any]) -> dict[str, Any]:
+        settings = _api2_runtime_settings_from_payload(payload, self.get_settings(safe=False))
+        started = perf_counter()
+        try:
+            llm_service = self._resolve_api2_llm_service(settings)
+            prompt = _build_api2_test_prompt()
+            result = await llm_service.generate(
+                prompt,
+                _make_generation_config(
+                    model=str(settings.get("model") or ""),
+                    max_tokens=32,
+                    temperature=0.0,
+                ),
+            )
+            return {
+                "ok": True,
+                "provider_mode": settings.get("provider_mode"),
+                "protocol": (settings.get("custom_profile") or {}).get("protocol") if settings.get("provider_mode") == "custom" else None,
+                "model": str(settings.get("model") or ""),
+                "latency_ms": int((perf_counter() - started) * 1000),
+                "preview": str(result.content or "").strip()[:120],
+                "token_usage": _token_usage_to_dict(getattr(result, "token_usage", None)),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "provider_mode": settings.get("provider_mode"),
+                "model": str(settings.get("model") or ""),
+                "latency_ms": int((perf_counter() - started) * 1000),
+                "error": str(exc),
+            }
 
     async def after_novel_created(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -1516,6 +1561,164 @@ def _redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
     custom["api_key"] = ""
     custom["api_key_configured"] = bool(api_key)
     return safe
+
+
+def _build_api2_models_request(payload: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    api2 = settings.get("api2_control_card") if isinstance(settings.get("api2_control_card"), dict) else {}
+    saved_custom = api2.get("custom_profile") if isinstance(api2.get("custom_profile"), dict) else {}
+    submitted_custom = payload.get("custom_profile") if isinstance(payload.get("custom_profile"), dict) else {}
+    provider_mode = str(payload.get("provider_mode") or api2.get("provider_mode") or "same_as_main")
+    if provider_mode not in API2_PROVIDER_MODES:
+        provider_mode = "same_as_main"
+
+    if provider_mode == "custom":
+        protocol = str(submitted_custom.get("protocol") or saved_custom.get("protocol") or "openai").strip()
+        if protocol not in API2_PROTOCOLS:
+            protocol = "openai"
+        api_key = str(submitted_custom.get("api_key") or "").strip()
+        if api_key in {"", "********", "••••••••"}:
+            api_key = str(saved_custom.get("api_key") or "").strip()
+        return {
+            "source": "custom",
+            "protocol": protocol,
+            "base_url": str(submitted_custom.get("base_url") or saved_custom.get("base_url") or "").strip(),
+            "api_key": api_key,
+            "timeout_ms": _clamp_int(payload.get("timeout_ms"), 1000, 120000, 30000),
+        }
+
+    active_protocol = str(payload.get("protocol") or "openai").strip() or "openai"
+    active_base_url = str(payload.get("base_url") or "").strip()
+    active_api_key = str(payload.get("api_key") or "").strip()
+    if not active_api_key:
+        try:
+            from application.ai.llm_control_service import LLMControlService
+
+            active_profile = LLMControlService().get_active_profile()
+            if active_profile:
+                active_protocol = str(active_profile.protocol or active_protocol)
+                active_base_url = str(active_profile.base_url or active_base_url)
+                active_api_key = str(active_profile.api_key or "")
+        except Exception:
+            pass
+
+    return {
+        "source": "same_as_main",
+        "protocol": active_protocol if active_protocol in API2_PROTOCOLS else "openai",
+        "base_url": active_base_url,
+        "api_key": active_api_key,
+        "timeout_ms": _clamp_int(payload.get("timeout_ms"), 1000, 120000, 30000),
+    }
+
+
+def _api2_runtime_settings_from_payload(payload: dict[str, Any], saved_settings: dict[str, Any]) -> dict[str, Any]:
+    raw_api2 = payload.get("api2_control_card") if isinstance(payload.get("api2_control_card"), dict) else payload
+    return _normalize_settings({"api2_control_card": raw_api2}, existing=saved_settings)["api2_control_card"]
+
+
+async def _fetch_api2_model_items(request: dict[str, Any]) -> list[dict[str, str]]:
+    import httpx
+
+    api_key = str(request.get("api_key") or "").strip()
+    if not api_key:
+        raise ValueError("API key is required to fetch model list")
+
+    protocol = str(request.get("protocol") or "openai").strip()
+    base_url = str(request.get("base_url") or "").strip()
+    timeout = max(1.0, _clamp_int(request.get("timeout_ms"), 1000, 120000, 30000) / 1000)
+    headers: dict[str, str]
+    params: Optional[dict[str, str]] = None
+
+    if protocol == "anthropic":
+        url = f"{(base_url or 'https://api.anthropic.com').rstrip('/')}/v1/models"
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+    elif protocol == "gemini":
+        url = f"{_gemini_models_base(base_url)}/models"
+        headers = {}
+        params = {"key": api_key}
+    else:
+        url = f"{_openai_models_base(base_url)}/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        body = (exc.response.text or "")[:400].replace("\n", " ")
+        raise RuntimeError(f"上游模型列表 HTTP {exc.response.status_code}：{body or exc.response.reason_phrase}（请求 {url}）") from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"连接上游失败：{exc}（请求 {url}）") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"上游未返回 JSON（请求 {url}）") from exc
+
+    return _normalize_api2_model_items(data, protocol)
+
+
+def _normalize_api2_model_items(data: dict[str, Any], protocol: str) -> list[dict[str, str]]:
+    if protocol == "gemini":
+        raw_items = data.get("models", [])
+    else:
+        raw_items = data.get("data", [])
+    if not isinstance(raw_items, list):
+        return []
+
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            continue
+        raw_id = entry.get("id") or entry.get("name") or entry.get("model")
+        model_id = str(raw_id or "").strip()
+        if protocol == "gemini" and model_id.startswith("models/"):
+            model_id = model_id.removeprefix("models/")
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        items.append(
+            {
+                "id": model_id,
+                "name": str(entry.get("displayName") or entry.get("name") or model_id).removeprefix("models/"),
+                "owned_by": str(entry.get("owned_by") or entry.get("ownedBy") or entry.get("publisher") or ""),
+            }
+        )
+    return items
+
+
+def _openai_models_base(base_url: str) -> str:
+    raw = (base_url or "").strip() or "https://api.openai.com/v1"
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parsed = urlparse(raw)
+    path = (parsed.path or "").rstrip("/")
+    if not path:
+        path = "/v1"
+    else:
+        path = "/" + path.lstrip("/")
+    return urlunparse((parsed.scheme or "https", parsed.netloc, path, "", "", "")).rstrip("/")
+
+
+def _gemini_models_base(base_url: str) -> str:
+    raw = (base_url or "").strip().rstrip("/") or "https://generativelanguage.googleapis.com/v1beta"
+    for suffix in ("/models", "/v1beta/models", "/v1/models"):
+        if raw.lower().endswith(suffix):
+            raw = raw[: -len(suffix)].rstrip("/")
+            break
+    return raw
+
+
+def _build_api2_test_prompt() -> Any:
+    try:
+        from domain.ai.value_objects.prompt import Prompt
+
+        return Prompt(system="你是 API 连接测试器。", user="请只回复 OK 两个字母，不要添加任何解释。")
+    except Exception:
+        class PromptFallback:
+            def __init__(self) -> None:
+                self.system = "你是 API 连接测试器。"
+                self.user = "请只回复 OK 两个字母，不要添加任何解释。"
+
+        return PromptFallback()
 
 
 def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:

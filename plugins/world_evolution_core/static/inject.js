@@ -12,6 +12,8 @@
     selectedCharacterId: null,
     lastPayload: null,
     settingsMessage: '',
+    modelFetchMessage: '',
+    api2Models: [],
   };
 
   function ensurePanel() {
@@ -494,9 +496,23 @@
             <label>Base URL
               <input name="base_url" value="${escapeAttr(custom.base_url || '')}" placeholder="https://api.example.com/v1">
             </label>
-            <label>模型名
-              <input name="model" value="${escapeAttr(custom.model || '')}" placeholder="用于压缩控制卡的模型">
-            </label>
+            <div class="ewa-model-field">
+              <span>模型名</span>
+              <div class="ewa-model-picker">
+                <input name="model" data-api2-model-input list="ewa-api2-model-options" value="${escapeAttr(custom.model || '')}" placeholder="用于压缩控制卡的模型">
+                <button type="button" class="ewa-mini-action" data-fetch-api2-models>获取模型</button>
+              </div>
+              <datalist id="ewa-api2-model-options">
+                ${state.api2Models.map((item) => `<option value="${escapeAttr(item.id || item.name || item)}"></option>`).join('')}
+              </datalist>
+              <select data-api2-model-select>
+                <option value="">选择已获取模型</option>
+                ${state.api2Models.map((item) => {
+                  const modelId = item.id || item.name || item;
+                  return `<option value="${escapeAttr(modelId)}" ${modelId === custom.model ? 'selected' : ''}>${escapeHtml(modelId)}</option>`;
+                }).join('')}
+              </select>
+            </div>
             <label>API Key
               <input name="api_key" type="password" value="" placeholder="${custom.api_key_configured ? '已保存，留空则继续使用' : '输入自定义 API Key'}">
             </label>
@@ -512,7 +528,9 @@
           </div>
           <div class="ewa-action-row">
             <button type="submit" class="ewa-mini-action">保存设置</button>
+            <button type="button" class="ewa-mini-action" data-test-api2-connection>测试连接</button>
             <span class="ewa-import-message" data-settings-message>${escapeHtml(state.settingsMessage || '')}</span>
+            <span class="ewa-import-message" data-model-fetch-message>${escapeHtml(state.modelFetchMessage || '')}</span>
           </div>
         </form>
       </section>
@@ -529,28 +547,68 @@
     };
     form.querySelectorAll('input[name="provider_mode"]').forEach((item) => item.addEventListener('change', syncCustomVisibility));
     syncCustomVisibility();
+    form.querySelector('[data-api2-model-select]')?.addEventListener('change', (event) => {
+      const value = event.currentTarget.value || '';
+      if (value && form.elements.model) form.elements.model.value = value;
+    });
+    form.querySelector('[data-fetch-api2-models]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      const message = form.querySelector('[data-model-fetch-message]');
+      button.disabled = true;
+      button.textContent = '获取中...';
+      state.modelFetchMessage = '';
+      if (message) message.textContent = '';
+      try {
+        const response = await fetch('/api/v1/plugins/evolution-world/settings/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildApi2SettingsPayload(form)),
+        });
+        if (!response.ok) throw new Error(await readErrorDetail(response, `模型拉取失败：${response.status}`));
+        const result = await response.json();
+        state.api2Models = Array.isArray(result.items) ? result.items : [];
+        state.modelFetchMessage = state.api2Models.length ? `已获取 ${state.api2Models.length} 个模型。` : '未获取到模型。';
+        const currentModel = form.elements.model?.value || '';
+        updateApi2ModelChoices(form, currentModel);
+        if (message) message.textContent = state.modelFetchMessage;
+      } catch (error) {
+        state.modelFetchMessage = String(error);
+        if (message) message.textContent = state.modelFetchMessage;
+      } finally {
+        button.disabled = false;
+        button.textContent = '获取模型';
+      }
+    });
+    form.querySelector('[data-test-api2-connection]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      const message = form.querySelector('[data-settings-message]');
+      button.disabled = true;
+      button.textContent = '测试中...';
+      state.settingsMessage = '';
+      if (message) message.textContent = '';
+      try {
+        const response = await fetch('/api/v1/plugins/evolution-world/settings/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildApi2SettingsPayload(form)),
+        });
+        if (!response.ok) throw new Error(await readErrorDetail(response, `连接测试失败：${response.status}`));
+        const result = await response.json();
+        if (!result.ok) throw new Error(result.error || '连接测试失败');
+        state.settingsMessage = `连接成功：${result.model || '当前模型'} · ${result.latency_ms}ms`;
+      } catch (error) {
+        state.settingsMessage = String(error);
+      } finally {
+        button.disabled = false;
+        button.textContent = '测试连接';
+        if (message) message.textContent = state.settingsMessage;
+      }
+    });
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const button = form.querySelector('button[type="submit"]');
       const message = form.querySelector('[data-settings-message]');
-      const mode = form.querySelector('input[name="provider_mode"]:checked')?.value || 'same_as_main';
-      const payload = {
-        api2_control_card: {
-          enabled: Boolean(form.elements.enabled?.checked),
-          provider_mode: mode,
-          temperature: Number(form.elements.temperature?.value || 0.2),
-          max_tokens: Number(form.elements.max_tokens?.value || 1400),
-          custom_profile: {
-            protocol: form.elements.protocol?.value || 'openai',
-            base_url: form.elements.base_url?.value || '',
-            api_key: form.elements.api_key?.value || '',
-            model: form.elements.model?.value || '',
-            temperature: Number(form.elements.temperature?.value || 0.2),
-            max_tokens: Number(form.elements.max_tokens?.value || 1400),
-            timeout_seconds: Number(form.elements.timeout_seconds?.value || 180),
-          },
-        },
-      };
+      const payload = buildApi2SettingsPayload(form);
       button.disabled = true;
       button.textContent = '保存中...';
       try {
@@ -575,6 +633,45 @@
         }, 3200);
       }
     });
+  }
+
+  function buildApi2SettingsPayload(form) {
+    const mode = form.querySelector('input[name="provider_mode"]:checked')?.value || 'same_as_main';
+    return {
+      api2_control_card: {
+        enabled: Boolean(form.elements.enabled?.checked),
+        provider_mode: mode,
+        temperature: Number(form.elements.temperature?.value || 0.2),
+        max_tokens: Number(form.elements.max_tokens?.value || 1400),
+        custom_profile: {
+          protocol: form.elements.protocol?.value || 'openai',
+          base_url: form.elements.base_url?.value || '',
+          api_key: form.elements.api_key?.value || '',
+          model: form.elements.model?.value || '',
+          temperature: Number(form.elements.temperature?.value || 0.2),
+          max_tokens: Number(form.elements.max_tokens?.value || 1400),
+          timeout_seconds: Number(form.elements.timeout_seconds?.value || 180),
+        },
+      },
+      timeout_ms: 30000,
+    };
+  }
+
+  function updateApi2ModelChoices(form, selectedModel) {
+    const datalist = form.querySelector('#ewa-api2-model-options');
+    const select = form.querySelector('[data-api2-model-select]');
+    const options = state.api2Models
+      .map((item) => item.id || item.name || item)
+      .filter(Boolean);
+    if (datalist) {
+      datalist.innerHTML = options.map((modelId) => `<option value="${escapeAttr(modelId)}"></option>`).join('');
+    }
+    if (select) {
+      select.innerHTML = `
+        <option value="">${options.length ? '选择已获取模型' : '暂无已获取模型'}</option>
+        ${options.map((modelId) => `<option value="${escapeAttr(modelId)}" ${modelId === selectedModel ? 'selected' : ''}>${escapeHtml(modelId)}</option>`).join('')}
+      `;
+    }
   }
 
   function renderImportedFlowCard(flow) {
@@ -680,6 +777,24 @@
     window.setTimeout(() => {
       element.textContent = '';
     }, 3000);
+  }
+
+  async function readErrorDetail(response, fallback) {
+    try {
+      const data = await response.json();
+      if (typeof data.detail === 'string' && data.detail.trim()) return data.detail.trim();
+      if (Array.isArray(data.detail)) {
+        return data.detail.map((item) => item?.msg || JSON.stringify(item)).join('; ');
+      }
+    } catch (error) {
+      try {
+        const text = await response.text();
+        if (text.trim()) return text.trim().slice(0, 300);
+      } catch (ignored) {
+        // Keep the caller's fallback if the body has already been consumed.
+      }
+    }
+    return fallback;
   }
 
   function bindRollbackButtons(root) {

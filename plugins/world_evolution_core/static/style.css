@@ -149,7 +149,10 @@
 .ewa-fieldset input { accent-color: #22d3ee; }
 .ewa-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; transition: opacity 0.18s ease; }
 .ewa-form-grid.is-muted { opacity: 0.42; }
-.ewa-form-grid label { display: grid; gap: 6px; color: var(--ewa-muted); font-size: 12px; font-weight: 800; }
+.ewa-form-grid label,
+.ewa-model-field { display: grid; gap: 6px; color: var(--ewa-muted); font-size: 12px; font-weight: 800; }
+.ewa-model-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.ewa-model-picker .ewa-mini-action { padding: 8px 11px; white-space: nowrap; }
 .ewa-form-grid input,
 .ewa-form-grid select,
 .ewa-preset-input {

@@ -50,6 +50,21 @@ async def update_settings(payload: dict):
     return {"ok": True, "settings": _service.update_settings(payload or {})}
 
 
+@router.post("/settings/models")
+async def fetch_api2_models(payload: dict):
+    try:
+        return await _service.fetch_api2_models(payload or {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/settings/test")
+async def test_api2_connection(payload: dict):
+    return await _service.test_api2_connection(payload or {})
+
+
 @router.get("/novels/{novel_id}/characters")
 async def list_characters(novel_id: str):
     return _service.list_characters(novel_id)
