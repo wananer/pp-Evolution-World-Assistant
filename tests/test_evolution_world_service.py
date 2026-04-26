@@ -267,6 +267,16 @@ async def test_extractor_does_not_include_motion_particles_in_names(tmp_path):
     assert "顾岚" in result["data"]["facts"]["characters"]
     assert "顾岚从" not in result["data"]["facts"]["characters"]
 
+    follow_up = await service.after_commit(
+        {
+            "novel_id": "novel-name-particles",
+            "chapter_number": 2,
+            "payload": {"content": "沈砚留在走廊，继续记录黑匣子。"},
+        }
+    )
+    assert "沈砚" in follow_up["data"]["facts"]["characters"]
+    assert "沈砚留" not in follow_up["data"]["facts"]["characters"]
+
 
 @pytest.mark.asyncio
 async def test_api2_control_card_setting_compresses_context_inside_evolution(tmp_path):

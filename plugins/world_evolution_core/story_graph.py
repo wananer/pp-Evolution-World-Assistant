@@ -27,14 +27,14 @@ def build_story_graph_chapter(
     """Build one chapter's graph delta from already extracted Evolution facts."""
     previous_positions = _latest_character_positions(previous_chapters)
     characters = _strings(snapshot.get("characters"))
-    chapter_locations = _dedupe(
+    state_locations = _dedupe(
         [
             *_locations_from_state(chapter_summary.get("opening_state")),
             *_locations_from_state(chapter_summary.get("chapter_state")),
             *_locations_from_state(chapter_summary.get("ending_state")),
-            *_strings(snapshot.get("locations")),
         ]
     )
+    chapter_locations = state_locations or _dedupe(_strings(snapshot.get("locations")))
     opening_locations = _locations_from_state(chapter_summary.get("opening_state")) or chapter_locations[:1]
     ending_locations = _locations_from_state(chapter_summary.get("ending_state")) or chapter_locations[-1:] or opening_locations
     opening_location = _canonical_location(opening_locations[0]) if opening_locations else ""

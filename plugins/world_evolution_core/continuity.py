@@ -315,6 +315,9 @@ def _clean_location(value: str) -> str:
     for prefix in ("但", "然后", "已经", "主楼", "根据", "发件人是", "大多穿着深灰色的"):
         if text.startswith(prefix):
             text = text[len(prefix):]
+    for marker in sorted(LOCATION_MARKERS, key=len, reverse=True):
+        if text != marker and text.endswith(marker):
+            return marker
     return text
 
 
