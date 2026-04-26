@@ -32,6 +32,9 @@
     "after_chapter_review",
     "review_chapter"
   ],
+  "route_aliases": [
+    "evolution-world"
+  ],
   "permissions": [
     "read_novel",
     "read_chapter",

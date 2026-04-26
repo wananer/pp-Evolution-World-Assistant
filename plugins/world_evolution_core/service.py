@@ -13,7 +13,7 @@ from .continuity import build_chapter_summary, build_volume_summary
 from .context_capsules import build_injection_record
 from .context_patch import build_context_patch, render_patch_summary
 from .preset_converter import convert_st_preset
-from .repositories import EvolutionWorldRepository
+from .repositories import RECENT_CONTEXT_FACT_LIMIT, EvolutionWorldRepository
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
 PLUGIN_NAME = "world_evolution_core"
@@ -157,7 +157,7 @@ class EvolutionWorldAssistantService:
         )
         snapshot = extraction.snapshot
         chapter_summary = build_chapter_summary(novel_id, chapter_number, content, _now())
-        known_names = [card.get("name") for card in self.repository.list_character_cards(novel_id).get("items", [])]
+        known_names = [card.get("name") for card in self.repository.list_character_index(novel_id).get("items", [])]
         for name in known_names:
             if name and name in content and name not in snapshot.characters:
                 snapshot.characters.append(name)
@@ -431,8 +431,12 @@ class EvolutionWorldAssistantService:
             return {"ok": True, "skipped": True, "reason": "missing novel_id/chapter_number/content"}
 
         evidence = self.repository.build_review_evidence(novel_id, content, before_chapter=chapter_number)
-        cards = evidence.get("characters") or self.repository.list_character_cards(novel_id).get("items", [])
-        facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
+        cards = evidence.get("characters") or self.repository.list_relevant_character_cards(novel_id, content).get("items", [])
+        facts = self.repository.list_fact_snapshots(
+            novel_id,
+            before_chapter=chapter_number,
+            limit=RECENT_CONTEXT_FACT_LIMIT,
+        )
         issues: list[dict[str, Any]] = []
         suggestions: list[str] = []
 
@@ -500,8 +504,12 @@ class EvolutionWorldAssistantService:
         return {"ok": True, "data": {"recorded": True, "chapter_number": chapter_number}}
 
     def build_context_patch(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> dict[str, Any]:
-        facts = self.repository.list_fact_snapshots(novel_id, before_chapter=chapter_number)
-        characters = self.repository.list_character_cards(novel_id).get("items", [])
+        facts = self.repository.list_fact_snapshots(
+            novel_id,
+            before_chapter=chapter_number,
+            limit=RECENT_CONTEXT_FACT_LIMIT,
+        )
+        characters = self.repository.list_relevant_character_cards(novel_id, outline).get("items", [])
         chapter_summaries = self.repository.list_chapter_summaries(novel_id, before_chapter=chapter_number, limit=10)
         volume_summaries = self.repository.list_volume_summaries(novel_id, before_chapter=chapter_number, limit=3)
         previous_injections = self.repository.list_context_injection_records(novel_id, limit=20)

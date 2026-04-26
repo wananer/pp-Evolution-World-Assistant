@@ -54,6 +54,30 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_evolution_keeps_query_indexes_inside_plugin_state(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    for chapter in range(1, 18):
+        await service.after_commit(
+            {
+                "novel_id": "novel-indexed",
+                "chapter_number": chapter,
+                "payload": {"content": f"《林澈》在雾城第{chapter}区记录黑塔线索。"},
+            }
+        )
+
+    facts_index = storage.read_json("world_evolution_core", ["novels", "novel-indexed", "facts_index.json"])
+    character_index = storage.read_json("world_evolution_core", ["novels", "novel-indexed", "characters_index.json"])
+
+    assert [item["chapter_number"] for item in facts_index["items"]][-3:] == [15, 16, 17]
+    assert character_index["items"][0]["name"] == "林澈"
+    assert service.repository.list_fact_snapshots("novel-indexed", before_chapter=17, limit=5)[0]["chapter_number"] == 12
+    assert service.repository.list_fact_snapshots("novel-indexed", before_chapter=17, limit=5)[-1]["chapter_number"] == 16
+    assert service.repository.list_relevant_character_cards("novel-indexed", "林澈继续调查黑塔")["items"][0]["name"] == "林澈"
+
+
+@pytest.mark.asyncio
 async def test_after_commit_writes_chapter_and_volume_summaries(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
