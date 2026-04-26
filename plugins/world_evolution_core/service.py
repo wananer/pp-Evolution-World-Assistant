@@ -1566,8 +1566,9 @@ def _redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
 def _build_api2_models_request(payload: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     api2 = settings.get("api2_control_card") if isinstance(settings.get("api2_control_card"), dict) else {}
     saved_custom = api2.get("custom_profile") if isinstance(api2.get("custom_profile"), dict) else {}
-    submitted_custom = payload.get("custom_profile") if isinstance(payload.get("custom_profile"), dict) else {}
-    provider_mode = str(payload.get("provider_mode") or api2.get("provider_mode") or "same_as_main")
+    submitted_api2 = payload.get("api2_control_card") if isinstance(payload.get("api2_control_card"), dict) else payload
+    submitted_custom = submitted_api2.get("custom_profile") if isinstance(submitted_api2.get("custom_profile"), dict) else {}
+    provider_mode = str(submitted_api2.get("provider_mode") or api2.get("provider_mode") or "same_as_main")
     if provider_mode not in API2_PROVIDER_MODES:
         provider_mode = "same_as_main"
 
@@ -1586,9 +1587,9 @@ def _build_api2_models_request(payload: dict[str, Any], settings: dict[str, Any]
             "timeout_ms": _clamp_int(payload.get("timeout_ms"), 1000, 120000, 30000),
         }
 
-    active_protocol = str(payload.get("protocol") or "openai").strip() or "openai"
-    active_base_url = str(payload.get("base_url") or "").strip()
-    active_api_key = str(payload.get("api_key") or "").strip()
+    active_protocol = str(submitted_api2.get("protocol") or "openai").strip() or "openai"
+    active_base_url = str(submitted_api2.get("base_url") or "").strip()
+    active_api_key = str(submitted_api2.get("api_key") or "").strip()
     if not active_api_key:
         try:
             from application.ai.llm_control_service import LLMControlService

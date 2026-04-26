@@ -321,6 +321,53 @@ async def test_api2_model_fetch_uses_saved_custom_key_without_exposing_it(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_api2_model_fetch_uses_current_form_values(tmp_path, monkeypatch):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.update_settings(
+        {
+            "api2_control_card": {
+                "provider_mode": "custom",
+                "custom_profile": {
+                    "protocol": "openai",
+                    "base_url": "https://api.old.example/v1",
+                    "api_key": "stored-secret",
+                },
+            }
+        }
+    )
+    calls = []
+
+    async def fake_fetch_model_items(request):
+        calls.append(request)
+        return [{"id": "deepseek-chat", "name": "deepseek-chat", "owned_by": "deepseek"}]
+
+    monkeypatch.setattr(evolution_service_module, "_fetch_api2_model_items", fake_fetch_model_items)
+
+    result = await service.fetch_api2_models(
+        {
+            "api2_control_card": {
+                "provider_mode": "custom",
+                "custom_profile": {
+                    "protocol": "openai",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "typed-secret",
+                    "model": "deepseek-chat",
+                },
+            },
+            "timeout_ms": 60000,
+        }
+    )
+
+    assert result["ok"] is True
+    assert calls[0]["api_key"] == "typed-secret"
+    assert calls[0]["base_url"] == "https://api.deepseek.com/v1"
+    assert calls[0]["timeout_ms"] == 60000
+    assert "stored-secret" not in str(result)
+    assert "typed-secret" not in str(result)
+
+
+@pytest.mark.asyncio
 async def test_api2_connection_test_uses_current_form_values(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(
