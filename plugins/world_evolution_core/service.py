@@ -18,6 +18,7 @@ from .context_capsules import build_injection_record
 from .context_patch import build_context_patch, render_patch_summary
 from .preset_converter import convert_st_preset
 from .repositories import RECENT_CONTEXT_FACT_LIMIT, EvolutionWorldRepository
+from .story_graph import build_global_route_map, build_story_graph_chapter
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
 PLUGIN_NAME = "world_evolution_core"
@@ -245,6 +246,17 @@ class EvolutionWorldAssistantService:
             novel_id,
             _build_continuity_constraints(novel_id, updated_cards, snapshot.chapter_number, timeline_events),
         )
+        previous_graph_chapters = self.repository.list_story_graph_chapters(novel_id, before_chapter=chapter_number)
+        story_graph_chapter = build_story_graph_chapter(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            snapshot=snapshot.to_dict(),
+            chapter_summary=chapter_summary,
+            timeline_events=timeline_events,
+            previous_chapters=previous_graph_chapters,
+            at=_now(),
+        )
+        self.repository.save_story_graph_chapter(novel_id, chapter_number, story_graph_chapter)
         finished_at = _now()
         duration_ms = int((perf_counter() - start_time) * 1000)
         self.repository.append_event(
@@ -274,6 +286,9 @@ class EvolutionWorldAssistantService:
                     "replaced_existing_snapshot": bool(previous_snapshot),
                     "chapter_summary_saved": True,
                     "volume_summary_saved": bool(volume_summary),
+                    "story_graph_saved": True,
+                    "route_edge_count": len(story_graph_chapter.get("route_edges") or []),
+                    "route_conflict_count": len(story_graph_chapter.get("conflicts") or []),
                 },
             },
         )
@@ -291,6 +306,7 @@ class EvolutionWorldAssistantService:
                 output_json={
                     "facts_path": f"facts/chapter_{chapter_number}.json",
                     "summary_path": f"summaries/chapters/chapter_{chapter_number}.json",
+                    "story_graph_path": f"story_graph/chapters/chapter_{chapter_number}.json",
                     "characters_updated": [card.get("character_id") for card in updated_cards],
                 },
             )
@@ -303,6 +319,7 @@ class EvolutionWorldAssistantService:
                 "volume_summary": volume_summary,
                 "characters_updated": updated_cards,
                 "extraction": extraction.to_dict(),
+                "story_graph": story_graph_chapter,
             },
         }
 
@@ -484,6 +501,7 @@ class EvolutionWorldAssistantService:
                 "evidence": evidence.get("events", []),
                 "constraints": evidence.get("constraints", []),
                 "characters": evidence.get("characters", []),
+                "route_conflicts": evidence.get("route_conflicts", []),
             },
         }
 
@@ -534,6 +552,7 @@ class EvolutionWorldAssistantService:
 
         removed = self.repository.delete_fact_snapshot(novel_id, chapter_number)
         self.repository.delete_chapter_summary(novel_id, chapter_number)
+        self.repository.delete_story_graph_chapter(novel_id, chapter_number)
         cards = self.repository.rebuild_character_cards_from_facts(novel_id)
         event = {
             "type": "chapter_rollback",
@@ -591,6 +610,15 @@ class EvolutionWorldAssistantService:
 
     def list_continuity_constraints(self, novel_id: str, limit: int = 80) -> dict[str, Any]:
         return {"items": self.repository.list_continuity_constraints(novel_id, limit=limit)}
+
+    def get_global_route_map(self, novel_id: str) -> dict[str, Any]:
+        return build_global_route_map(novel_id, self.repository.list_story_graph_chapters(novel_id))
+
+    def list_story_graph_chapters(self, novel_id: str, limit: int = 50) -> dict[str, Any]:
+        return {"items": self.repository.list_story_graph_chapters(novel_id, limit=limit)}
+
+    def list_route_conflicts(self, novel_id: str, limit: int = 80) -> dict[str, Any]:
+        return {"items": self.repository.list_route_conflicts(novel_id, limit=limit)}
 
     def list_review_records(self, novel_id: str, limit: int = 30) -> dict[str, Any]:
         return {"items": self.repository.list_review_records(novel_id, limit=limit)}
@@ -668,6 +696,7 @@ class EvolutionWorldAssistantService:
                 "reviewed_characters": [card.get("name") for card in mentioned_cards],
                 "evidence": evidence.get("events", []),
                 "constraints": evidence.get("constraints", []),
+                "route_conflicts": evidence.get("route_conflicts", []),
             },
         }
 
@@ -700,6 +729,7 @@ class EvolutionWorldAssistantService:
         chapter_summaries = self.repository.list_chapter_summaries(novel_id, before_chapter=chapter_number, limit=10)
         volume_summaries = self.repository.list_volume_summaries(novel_id, before_chapter=chapter_number, limit=3)
         previous_injections = self.repository.list_context_injection_records(novel_id, limit=20)
+        route_map = self.get_global_route_map(novel_id)
         return build_context_patch(
             novel_id,
             chapter_number,
@@ -709,6 +739,7 @@ class EvolutionWorldAssistantService:
             chapter_summaries=chapter_summaries,
             volume_summaries=volume_summaries,
             previous_injections=previous_injections,
+            route_map=route_map,
         )
 
     def build_context_summary(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> str:

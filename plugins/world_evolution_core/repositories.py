@@ -194,6 +194,11 @@ class EvolutionWorldRepository:
         normalized.sort(key=lambda item: (item.get("first_seen_chapter") or 0, item.get("name") or ""))
         for card in normalized:
             self.write_character_card(novel_id, card)
+        self.storage.write_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "characters_index.json"],
+            {"items": [_character_index_entry(card) for card in normalized]},
+        )
         self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "characters.json"], {"items": normalized})
 
     def write_character_card(self, novel_id: str, card: dict[str, Any]) -> dict[str, Any]:
@@ -316,6 +321,72 @@ class EvolutionWorldRepository:
         items = sorted(items, key=lambda item: (str(item.get("subject") or ""), str(item.get("type") or ""), str(item.get("constraint_id") or "")))
         return items[-limit:] if limit > 0 else items
 
+    def save_story_graph_chapter(self, novel_id: str, chapter_number: int, graph: dict[str, Any]) -> None:
+        self.storage.write_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "story_graph", "chapters", f"chapter_{chapter_number}.json"],
+            graph,
+        )
+        self._upsert_story_graph_index_entry(novel_id, graph)
+
+    def delete_story_graph_chapter(self, novel_id: str, chapter_number: int) -> bool:
+        removed = self._delete_scope(["novels", novel_id, "story_graph", "chapters", f"chapter_{chapter_number}.json"])
+        if removed:
+            self._remove_story_graph_index_entry(novel_id, chapter_number)
+        return removed
+
+    def get_story_graph_chapter(self, novel_id: str, chapter_number: int) -> dict[str, Any] | None:
+        data = self.storage.read_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "story_graph", "chapters", f"chapter_{chapter_number}.json"],
+            default=None,
+        )
+        return data if isinstance(data, dict) else None
+
+    def list_story_graph_chapters(self, novel_id: str, before_chapter: Optional[int] = None, limit: Optional[int] = None) -> list[dict[str, Any]]:
+        indexed = self._list_story_graph_index(novel_id)
+        selected = []
+        if indexed:
+            for entry in indexed:
+                chapter_number = _int_or_none(entry.get("chapter_number"))
+                if not chapter_number:
+                    continue
+                if before_chapter and chapter_number >= before_chapter:
+                    continue
+                selected.append(entry)
+            selected.sort(key=lambda item: int(item.get("chapter_number") or 0))
+            if limit is not None and limit > 0:
+                selected = selected[-limit:]
+            chapters = []
+            for entry in selected:
+                chapter_number = _int_or_none(entry.get("chapter_number"))
+                if not chapter_number:
+                    continue
+                data = self.get_story_graph_chapter(novel_id, chapter_number)
+                if isinstance(data, dict):
+                    chapters.append(data)
+            return chapters
+
+        items = []
+        for data in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "story_graph", "chapters"]):
+            if not isinstance(data, dict):
+                continue
+            chapter_number = _int_or_none(data.get("chapter_number"))
+            if before_chapter and chapter_number and chapter_number >= before_chapter:
+                continue
+            items.append(data)
+        items = sorted(items, key=lambda item: int(item.get("chapter_number") or 0))
+        if limit is not None and limit > 0:
+            return items[-limit:]
+        return items
+
+    def list_route_conflicts(self, novel_id: str, limit: int = 80) -> list[dict[str, Any]]:
+        conflicts = []
+        for chapter in self.list_story_graph_chapters(novel_id):
+            conflicts.extend(item for item in chapter.get("conflicts") or [] if isinstance(item, dict))
+        conflicts = sorted(conflicts, key=lambda item: (int(item.get("chapter_current") or 0), str(item.get("type") or "")))
+        return conflicts[-limit:] if limit > 0 else conflicts
+
     def append_review_record(self, novel_id: str, record: dict[str, Any]) -> None:
         self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "timeline", "review_records.jsonl"], record)
 
@@ -354,6 +425,9 @@ class EvolutionWorldRepository:
         mentioned_cards = [card for card in cards if _card_is_mentioned(card, text)]
         events = self.list_timeline_events(novel_id, before_chapter=before_chapter, limit=60)
         constraints = self.list_continuity_constraints(novel_id)
+        route_conflicts = self.list_route_conflicts(novel_id)
+        route_constraints = [_route_conflict_as_constraint(item) for item in route_conflicts]
+        constraints = [*constraints, *route_constraints]
         if text:
             relevant_events = [event for event in events if _record_mentions(event, text)]
             relevant_constraints = [constraint for constraint in constraints if _record_mentions(constraint, text)]
@@ -368,6 +442,7 @@ class EvolutionWorldRepository:
             "characters": mentioned_cards or cards[-limit:],
             "events": relevant_events[-limit:],
             "constraints": relevant_constraints[:limit],
+            "route_conflicts": route_conflicts[-limit:],
         }
 
     def save_prehistory_worldline(self, novel_id: str, worldline: dict[str, Any]) -> None:
@@ -454,6 +529,38 @@ class EvolutionWorldRepository:
     def _remove_fact_index_entry(self, novel_id: str, chapter_number: int) -> None:
         entries = [item for item in self._list_fact_index(novel_id) if _int_or_none(item.get("chapter_number")) != chapter_number]
         self._write_fact_index(novel_id, entries)
+
+    def _list_story_graph_index(self, novel_id: str) -> list[dict[str, Any]]:
+        data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "story_graph_index.json"], default={"items": []})
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            items = [item for item in data["items"] if isinstance(item, dict)]
+            items.sort(key=lambda item: int(item.get("chapter_number") or 0))
+            return items
+        return []
+
+    def _write_story_graph_index(self, novel_id: str, items: list[dict[str, Any]]) -> None:
+        items.sort(key=lambda item: int(item.get("chapter_number") or 0))
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "story_graph_index.json"], {"items": items})
+
+    def _upsert_story_graph_index_entry(self, novel_id: str, graph: dict[str, Any]) -> None:
+        chapter_number = _int_or_none(graph.get("chapter_number"))
+        if not chapter_number:
+            return
+        entries = [item for item in self._list_story_graph_index(novel_id) if _int_or_none(item.get("chapter_number")) != chapter_number]
+        entries.append(
+            {
+                "chapter_number": chapter_number,
+                "location_count": len(graph.get("locations") or []),
+                "route_edge_count": len(graph.get("route_edges") or []),
+                "conflict_count": len(graph.get("conflicts") or []),
+                "vector_count": len(graph.get("vectors") or []),
+            }
+        )
+        self._write_story_graph_index(novel_id, entries)
+
+    def _remove_story_graph_index_entry(self, novel_id: str, chapter_number: int) -> None:
+        entries = [item for item in self._list_story_graph_index(novel_id) if _int_or_none(item.get("chapter_number")) != chapter_number]
+        self._write_story_graph_index(novel_id, entries)
 
     def _prepare_character_card(self, card: dict[str, Any]) -> dict[str, Any]:
         prepared = _ensure_character_defaults(dict(card))
@@ -732,6 +839,24 @@ def _record_mentions(record: dict[str, Any], text: str) -> bool:
             if value:
                 terms.append(value)
     return any(term and term in text for term in terms)
+
+
+def _route_conflict_as_constraint(conflict: dict[str, Any]) -> dict[str, Any]:
+    subject = str(conflict.get("character") or "")
+    current_location = str(conflict.get("current_location") or "")
+    previous_location = str(conflict.get("previous_location") or "")
+    return {
+        "constraint_id": str(conflict.get("conflict_id") or ""),
+        "type": "route_conflict",
+        "subject": subject,
+        "location": current_location or previous_location,
+        "rule": str(conflict.get("message") or ""),
+        "severity": str(conflict.get("severity") or "warning"),
+        "source": "story_graph",
+        "chapter_number": conflict.get("chapter_current"),
+        "participants": [subject] if subject else [],
+        "locations": [item for item in [previous_location, current_location] if item],
+    }
 
 
 def _split_match_terms(value: Any) -> list[str]:

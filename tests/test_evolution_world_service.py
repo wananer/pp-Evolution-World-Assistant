@@ -85,6 +85,40 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_after_commit_builds_story_graph_routes_and_conflicts(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-routes",
+            "chapter_number": 1,
+            "payload": {"content": "沈砚进入C307，找到黑匣子。结尾时沈砚仍在C307内部观察墙面划痕。"},
+        }
+    )
+    second = await service.after_commit(
+        {
+            "novel_id": "novel-routes",
+            "chapter_number": 2,
+            "payload": {"content": "沈砚推开C307的门，重新走进房间。他把黑匣子放在桌上。"},
+        }
+    )
+
+    assert second["data"]["story_graph"]["route_edges"]
+    route_map = service.get_global_route_map("novel-routes")
+    assert route_map["aggregate"]["route_edge_count"] >= 2
+    assert route_map["aggregate"]["hard_conflict_count"] >= 1
+    assert any(item["type"] == "repeated_arrival" for item in route_map["conflicts"])
+    assert route_map["vector_index"]["count"] >= 2
+    assert route_map["nodes"]
+    assert "人物路线与世界线图" in service.build_context_summary("novel-routes", 3)
+    review_context = service.before_chapter_review(
+        {"novel_id": "novel-routes", "chapter_number": 3, "payload": {"content": "沈砚继续检查C307。"}}
+    )
+    assert review_context["data"]["route_conflicts"]
+
+
+@pytest.mark.asyncio
 async def test_evolution_keeps_query_indexes_inside_plugin_state(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
@@ -215,6 +249,23 @@ async def test_after_commit_extracts_unquoted_chinese_character_names(tmp_path):
     assert result["data"]["facts"]["characters"] == ["沈砚", "顾岚", "陆行舟", "顾珩"]
     cards = service.list_characters("novel-unquoted")["items"]
     assert {card["name"] for card in cards} == {"沈砚", "顾岚", "陆行舟", "顾珩"}
+
+
+@pytest.mark.asyncio
+async def test_extractor_does_not_include_motion_particles_in_names(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-name-particles",
+            "chapter_number": 1,
+            "payload": {"content": "顾岚从走廊来到C307门边，沈砚进入C307，陆行舟赶到走廊。"},
+        }
+    )
+
+    assert "顾岚" in result["data"]["facts"]["characters"]
+    assert "顾岚从" not in result["data"]["facts"]["characters"]
 
 
 @pytest.mark.asyncio
@@ -996,6 +1047,41 @@ def test_transition_analysis_flags_repeated_arrival_time_and_object_conflicts():
     assert "time_rollback" in conflict_types
     assert "object_teleport" in conflict_types
     assert result["aggregate"]["hard_conflict_count"] >= 3
+
+
+def test_character_rebuild_replaces_stale_index_entries(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    service.repository.write_character_card(
+        "novel-stale-index",
+        {
+            "character_id": "stale",
+            "name": "顾岚从",
+            "first_seen_chapter": 1,
+            "last_seen_chapter": 1,
+            "aliases": [],
+            "recent_events": [],
+            "status": "active",
+        },
+    )
+    service.repository.write_character_cards(
+        "novel-stale-index",
+        [
+            {
+                "character_id": "gu-lan",
+                "name": "顾岚",
+                "first_seen_chapter": 1,
+                "last_seen_chapter": 1,
+                "aliases": [],
+                "recent_events": [],
+                "status": "active",
+            }
+        ],
+    )
+
+    names = [item["name"] for item in service.list_characters("novel-stale-index")["items"]]
+    assert names == ["顾岚"]
 
 
 @pytest.mark.asyncio

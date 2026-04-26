@@ -36,6 +36,10 @@ async def get_status():
             "story_planning_context",
             "api2_control_card",
             "api2_custom_provider",
+            "story_graph",
+            "global_route_map",
+            "route_conflict_detection",
+            "compact_vector_capsules",
         ],
     }
 
@@ -119,6 +123,21 @@ async def list_timeline_events(novel_id: str, before_chapter: Optional[int] = No
 @router.get("/novels/{novel_id}/timeline/constraints")
 async def list_continuity_constraints(novel_id: str, limit: int = 80):
     return _service.list_continuity_constraints(novel_id, limit=limit)
+
+
+@router.get("/novels/{novel_id}/story-graph/chapters")
+async def list_story_graph_chapters(novel_id: str, limit: int = 50):
+    return _service.list_story_graph_chapters(novel_id, limit=limit)
+
+
+@router.get("/novels/{novel_id}/routes/global")
+async def get_global_route_map(novel_id: str):
+    return _service.get_global_route_map(novel_id)
+
+
+@router.get("/novels/{novel_id}/routes/conflicts")
+async def list_route_conflicts(novel_id: str, limit: int = 80):
+    return _service.list_route_conflicts(novel_id, limit=limit)
 
 
 @router.get("/novels/{novel_id}/prehistory/worldline")

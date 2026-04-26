@@ -18,6 +18,7 @@ def build_context_patch(
     chapter_summaries: Optional[list[dict[str, Any]]] = None,
     volume_summaries: Optional[list[dict[str, Any]]] = None,
     previous_injections: Optional[list[dict[str, Any]]] = None,
+    route_map: Optional[dict[str, Any]] = None,
     max_characters: int = 8,
     max_facts: int = 5,
 ) -> dict[str, Any]:
@@ -103,6 +104,24 @@ def build_context_patch(
                 "token_budget": 520,
                 "content": _render_facts(recent_facts),
                 "items": recent_facts,
+            }
+        )
+
+    route_board = _render_route_board(route_map)
+    if route_board:
+        blocks.append(
+            {
+                "id": "story_graph_routes",
+                "title": "人物路线与世界线图",
+                "kind": "story_graph_route_constraints",
+                "priority": 58,
+                "token_budget": 360,
+                "content": route_board,
+                "items": {
+                    "aggregate": (route_map or {}).get("aggregate") or {},
+                    "conflicts": ((route_map or {}).get("conflicts") or [])[-6:],
+                    "meetings": ((route_map or {}).get("meetings") or [])[-8:],
+                },
             }
         )
 
@@ -218,6 +237,43 @@ def _render_usage_protocol() -> str:
         "章节承接状态是硬约束：下一章开头必须承接上一章结尾；若跳时空，需要先交代过渡。"
         "硬边界用于避免逻辑越界；软倾向只影响选择风格；可变状态可在本章新证据刺激下自然更新。"
     )
+
+
+def _render_route_board(route_map: Optional[dict[str, Any]]) -> str:
+    if not isinstance(route_map, dict):
+        return ""
+    aggregate = route_map.get("aggregate") if isinstance(route_map.get("aggregate"), dict) else {}
+    edges = [item for item in route_map.get("edges") or [] if isinstance(item, dict)]
+    conflicts = [item for item in route_map.get("conflicts") or [] if isinstance(item, dict)]
+    meetings = [item for item in route_map.get("meetings") or [] if isinstance(item, dict)]
+    if not edges and not conflicts:
+        return ""
+    lines = [
+        f"已记录路线边 {aggregate.get('route_edge_count', len(edges))} 条、地点 {aggregate.get('location_count', 0)} 个、交汇 {aggregate.get('meeting_count', len(meetings))} 处。",
+        "写下一章时必须先确认上一章人物终点；若改变地点，先写移动、跳时或视角桥接。",
+    ]
+    if edges:
+        lines.append("【最近路线】")
+        for edge in edges[-8:]:
+            lines.append(
+                f"- 第{edge.get('chapter_start')}章｜{edge.get('character')}："
+                f"{edge.get('from_location') or '未知'} -> {edge.get('to_location') or '未知'}"
+            )
+    if meetings:
+        lines.append("【路线交汇】")
+        for meeting in meetings[-5:]:
+            lines.append(f"- 第{meeting.get('chapter_number')}章｜{meeting.get('location')}：{'、'.join(_as_strings(meeting.get('characters')))}")
+    if conflicts:
+        lines.append("【需要审查的路线风险】")
+        for conflict in conflicts[-6:]:
+            lines.append(f"- {conflict.get('severity')}｜第{conflict.get('chapter_current')}章｜{conflict.get('message')}")
+    return "\n".join(lines)
+
+
+def _as_strings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
 
 
 def _render_focus_characters(characters: list[dict[str, Any]]) -> str:
@@ -348,6 +404,7 @@ def _render_palette_brief(value: Any) -> str:
         if descriptions:
             parts.append("行为衍生=" + " / ".join(descriptions))
     return "；".join(parts)
+
 
 def _render_background_constraints(characters: list[dict[str, Any]]) -> str:
     lines = []

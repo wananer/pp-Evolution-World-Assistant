@@ -19,6 +19,10 @@
     "story_planning_context": true,
     "api2_control_card": true,
     "api2_custom_provider": true,
+    "story_graph": true,
+    "global_route_map": true,
+    "route_conflict_detection": true,
+    "compact_vector_capsules": true,
     "manual_rebuild": true,
     "rollback": true,
     "chapter_review": true

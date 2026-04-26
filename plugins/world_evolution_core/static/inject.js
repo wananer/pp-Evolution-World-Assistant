@@ -46,6 +46,7 @@
       <nav class="ewa-tabs" aria-label="Evolution World tabs">
         <button type="button" data-tab="characters" class="active">角色卡</button>
         <button type="button" data-tab="events">世界线</button>
+        <button type="button" data-tab="routes">路线图</button>
         <button type="button" data-tab="status">运行态</button>
         <button type="button" data-tab="settings">设置</button>
       </nav>
@@ -78,15 +79,16 @@
       return;
     }
     try {
-      const [characters, status, runs, snapshots, importedFlows, settings] = await Promise.all([
+      const [characters, status, runs, snapshots, importedFlows, settings, routeMap] = await Promise.all([
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/characters`),
         runtime.fetchJson('/api/v1/plugins/evolution-world/status'),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/runs?limit=8`),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/snapshots`),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/imported-flows`),
         runtime.fetchJson('/api/v1/plugins/evolution-world/settings'),
+        runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/routes/global`),
       ]);
-      state.lastPayload = { novelId, characters, status, runs, snapshots, importedFlows, settings };
+      state.lastPayload = { novelId, characters, status, runs, snapshots, importedFlows, settings, routeMap };
       renderPanel(drawer);
     } catch (error) {
       console.warn('[EvolutionWorld] panel request failed:', error);
@@ -100,6 +102,7 @@
       return;
     }
     if (state.activeTab === 'events') return renderEvents(drawer, state.lastPayload);
+    if (state.activeTab === 'routes') return renderRoutes(drawer, state.lastPayload);
     if (state.activeTab === 'status') return renderStatus(drawer, state.lastPayload);
     if (state.activeTab === 'settings') return renderSettings(drawer, state.lastPayload);
     return renderCharacters(drawer, state.lastPayload);
@@ -381,6 +384,100 @@
           `).join('') || '<li><p>暂无事件</p></li>'}
         </ol>
       </section>
+    `;
+  }
+
+  function renderRoutes(drawer, payload) {
+    const content = drawer.querySelector('[data-content]');
+    const routeMap = payload.routeMap || {};
+    const nodes = Array.isArray(routeMap.nodes) ? routeMap.nodes : [];
+    const edges = Array.isArray(routeMap.edges) ? routeMap.edges : [];
+    const characters = Array.isArray(routeMap.characters) ? routeMap.characters : [];
+    const meetings = Array.isArray(routeMap.meetings) ? routeMap.meetings : [];
+    const conflicts = Array.isArray(routeMap.conflicts) ? routeMap.conflicts : [];
+    const aggregate = routeMap.aggregate || {};
+    content.innerHTML = `
+      <section class="ewa-summary-grid">
+        <article><b>${aggregate.location_count || nodes.length}</b><span>地点</span></article>
+        <article><b>${aggregate.route_edge_count || edges.length}</b><span>路线</span></article>
+        <article><b>${aggregate.conflict_count || conflicts.length}</b><span>风险</span></article>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>全局人物路线图</h3>
+          <p>不同颜色代表不同人物，交汇点代表同章同地相遇</p>
+        </div>
+        ${renderRouteCanvas(nodes, edges, characters, meetings)}
+      </section>
+      <section class="ewa-section ewa-route-meta">
+        <div class="ewa-section-head">
+          <h3>路线风险</h3>
+          <p>用于审查重复进入、缺少转场和位置跳跃</p>
+        </div>
+        <ol class="ewa-timeline">
+          ${conflicts.slice(-8).reverse().map((item) => `
+            <li>
+              <span>${escapeHtml(item.severity || 'warning')} · 第${escapeHtml(item.chapter_current || '-')}章</span>
+              <strong>${escapeHtml(item.character || item.type || '路线')}</strong>
+              <p>${escapeHtml(item.message || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无路线风险</p></li>'}
+        </ol>
+      </section>
+      <section class="ewa-section ewa-route-meta">
+        <div class="ewa-section-head">
+          <h3>向量胶囊</h3>
+          <p>压缩事实索引，后续可挂接真实 embedding</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>模式</dt><dd>${escapeHtml(routeMap.vector_index?.mode || '-')}</dd></div>
+          <div><dt>条目</dt><dd>${escapeHtml(routeMap.vector_index?.count || 0)}</dd></div>
+        </dl>
+      </section>
+    `;
+  }
+
+  function renderRouteCanvas(nodes, edges, characters, meetings) {
+    if (!nodes.length) {
+      return '<p class="ewa-empty-inline">暂无路线图数据。提交或重跑章节后会生成。</p>';
+    }
+    const colorByCharacter = new Map(characters.map((item) => [item.name, item.color]));
+    const nodeById = new Map(nodes.map((item) => [item.location_id, item]));
+    const lines = edges
+      .map((edge) => {
+        const from = nodeById.get(edge.from_location_id);
+        const to = nodeById.get(edge.to_location_id);
+        if (!from || !to) return '';
+        const color = colorByCharacter.get(edge.character) || '#64748b';
+        const x1 = Number(from.x || 0.5) * 100;
+        const y1 = Number(from.y || 0.5) * 100;
+        const x2 = Number(to.x || 0.5) * 100;
+        const y2 = Number(to.y || 0.5) * 100;
+        return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${escapeAttr(color)}" stroke-width="2.5" stroke-linecap="round"><title>${escapeHtml(edge.character || '')} 第${escapeHtml(edge.chapter_start || '-')}章 ${escapeHtml(edge.from_location || '')} -> ${escapeHtml(edge.to_location || '')}</title></line>`;
+      })
+      .join('');
+    const circles = nodes.map((node) => {
+      const x = Number(node.x || 0.5) * 100;
+      const y = Number(node.y || 0.5) * 100;
+      return `<g><circle cx="${x}" cy="${y}" r="3.8" fill="#f8fafc" stroke="#0f172a" stroke-width="1.2"></circle><text x="${x + 1.8}" y="${y - 1.8}" class="ewa-route-label">${escapeHtml(node.name || '')}</text></g>`;
+    }).join('');
+    const meetingMarks = meetings.map((meeting) => {
+      const node = nodeById.get(meeting.location_id);
+      if (!node) return '';
+      const x = Number(node.x || 0.5) * 100;
+      const y = Number(node.y || 0.5) * 100;
+      return `<circle cx="${x}" cy="${y}" r="6.4" fill="none" stroke="#f59e0b" stroke-width="2"><title>${escapeHtml((meeting.characters || []).join('、'))}</title></circle>`;
+    }).join('');
+    const legend = characters.map((item) => `<span><i style="background:${escapeAttr(item.color || '#64748b')}"></i>${escapeHtml(item.name || '')}</span>`).join('');
+    return `
+      <div class="ewa-route-map">
+        <svg viewBox="0 0 100 100" role="img" aria-label="Evolution route map">
+          ${lines}
+          ${meetingMarks}
+          ${circles}
+        </svg>
+      </div>
+      <div class="ewa-route-legend">${legend || '<span>暂无人物路线</span>'}</div>
     `;
   }
 
