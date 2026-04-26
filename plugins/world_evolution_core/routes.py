@@ -15,7 +15,7 @@ _service = EvolutionWorldAssistantService()
 async def get_status():
     return {
         "plugin_name": "world_evolution_core",
-        "version": "0.1.0",
+        "version": "0.1.1",
         "status": "installed",
         "phase": "structured-extraction-phase-2",
         "capabilities": [
@@ -34,8 +34,20 @@ async def get_status():
             "continuity_constraints",
             "prehistory_worldline",
             "story_planning_context",
+            "api2_control_card",
+            "api2_custom_provider",
         ],
     }
+
+
+@router.get("/settings")
+async def get_settings():
+    return {"ok": True, "settings": _service.get_settings(safe=True)}
+
+
+@router.put("/settings")
+async def update_settings(payload: dict):
+    return {"ok": True, "settings": _service.update_settings(payload or {})}
 
 
 @router.get("/novels/{novel_id}/characters")

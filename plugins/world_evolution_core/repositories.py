@@ -328,6 +328,19 @@ class EvolutionWorldRepository:
     def list_context_injection_records(self, novel_id: str, limit: int = 30) -> list[dict[str, Any]]:
         return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "context", "injection_records.jsonl"], limit=limit)
 
+    def append_context_control_card_record(self, novel_id: str, record: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "context", "control_cards.jsonl"], record)
+
+    def list_context_control_card_records(self, novel_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "context", "control_cards.jsonl"], limit=limit)
+
+    def get_settings(self) -> dict[str, Any]:
+        data = self.storage.read_json(PLUGIN_NAME, ["settings.json"], default={})
+        return data if isinstance(data, dict) else {}
+
+    def save_settings(self, settings: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["settings.json"], settings)
+
     def build_review_evidence(
         self,
         novel_id: str,

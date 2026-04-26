@@ -6,6 +6,28 @@ from plugins.platform.job_registry import PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
 
+class FakeControlCardResult:
+    def __init__(self, content):
+        self.content = content
+        self.token_usage = type(
+            "Usage",
+            (),
+            {"input_tokens": 123, "output_tokens": 45, "total_tokens": 168},
+        )()
+
+
+class FakeControlCardLLM:
+    def __init__(self):
+        self.calls = []
+
+    async def generate(self, prompt, config):
+        self.calls.append({"prompt": prompt, "config": config})
+        return FakeControlCardResult("【承接】沈砚已经在C307内部。\n【禁写】不要重复进入C307，不要使用没有说话。")
+
+    async def stream_generate(self, prompt, config):
+        yield "unused"
+
+
 @pytest.mark.asyncio
 async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     storage = PluginStorage(root=tmp_path)
@@ -184,6 +206,90 @@ async def test_after_commit_extracts_unquoted_chinese_character_names(tmp_path):
     assert result["data"]["facts"]["characters"] == ["沈砚", "顾岚", "陆行舟", "顾珩"]
     cards = service.list_characters("novel-unquoted")["items"]
     assert {card["name"] for card in cards} == {"沈砚", "顾岚", "陆行舟", "顾珩"}
+
+
+@pytest.mark.asyncio
+async def test_api2_control_card_setting_compresses_context_inside_evolution(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    fake_llm = FakeControlCardLLM()
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        api2_llm_service=fake_llm,
+    )
+    saved = service.update_settings(
+        {
+            "api2_control_card": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {
+                    "protocol": "openai",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "secret",
+                    "model": "api2-model",
+                    "temperature": 0.1,
+                    "max_tokens": 900,
+                },
+            }
+        }
+    )
+
+    assert saved["api2_control_card"]["enabled"] is True
+    assert saved["api2_control_card"]["custom_profile"]["api_key"] == ""
+    assert saved["api2_control_card"]["custom_profile"]["api_key_configured"] is True
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-api2",
+            "chapter_number": 1,
+            "payload": {"content": "沈砚进入C307，拿起黑匣子。结尾时沈砚仍在C307内部观察墙面划痕。"},
+        }
+    )
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-api2",
+            "chapter_number": 2,
+            "payload": {"outline": "沈砚继续调查C307内部的划痕。"},
+        }
+    )
+
+    block = context["context_blocks"][0]
+    assert block["title"] == "Evolution 写作控制卡"
+    assert "沈砚已经在C307内部" in block["content"]
+    assert "不要重复进入C307" in block["content"]
+    assert block["metadata"]["api2_control_card_enabled"] is True
+    assert block["metadata"]["api2_provider_mode"] == "custom"
+    assert fake_llm.calls
+    assert "只输出控制卡" in fake_llm.calls[0]["prompt"].user
+    records = service.repository.list_context_control_card_records("novel-api2")
+    assert records[-1]["provider_mode"] == "custom"
+    assert records[-1]["token_usage"]["total_tokens"] == 168
+
+
+def test_api2_settings_preserves_custom_key_when_update_leaves_key_blank(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.update_settings(
+        {
+            "api2_control_card": {
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "first-key", "model": "api2-model"},
+            }
+        }
+    )
+    service.update_settings(
+        {
+            "api2_control_card": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "", "model": "api2-model-2"},
+            }
+        }
+    )
+
+    raw = service.get_settings(safe=False)
+    assert raw["api2_control_card"]["custom_profile"]["api_key"] == "first-key"
+    assert raw["api2_control_card"]["custom_profile"]["model"] == "api2-model-2"
 
 
 @pytest.mark.asyncio

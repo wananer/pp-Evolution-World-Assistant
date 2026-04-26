@@ -93,7 +93,7 @@
 .ewa-kicker { color: var(--ewa-accent-2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; font-weight: 800; }
 .ewa-close { border: 0; background: rgba(255,255,255,0.08); color: #dbeafe; width: 32px; height: 32px; border-radius: 999px; font-size: 22px; cursor: pointer; }
 
-.ewa-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px 14px 6px; }
+.ewa-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 12px 14px 6px; }
 .ewa-tabs button { border: 1px solid rgba(148,163,184,0.18); border-radius: 999px; background: rgba(15,23,42,0.5); color: var(--ewa-muted); padding: 8px 10px; font-weight: 800; cursor: pointer; }
 .ewa-tabs button.active { color: #fff; border-color: rgba(167,139,250,0.55); background: linear-gradient(135deg, rgba(99,102,241,0.48), rgba(168,85,247,0.38)); box-shadow: 0 8px 22px rgba(124,58,237,0.22); }
 
@@ -140,9 +140,38 @@
 .ewa-footer { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px 14px; border-top: 1px solid rgba(148,163,184,0.16); color: var(--ewa-muted); font-size: 12px; }
 .ewa-footer button { border: 1px solid rgba(167,139,250,0.32); color: #ede9fe; background: rgba(124,58,237,0.22); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-weight: 800; }
 
+.ewa-settings-form { display: grid; gap: 14px; }
+.ewa-switch-row { display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 14px; background: rgba(30,41,59,0.72); color: #fff; font-weight: 800; }
+.ewa-switch-row input { width: 18px; height: 18px; accent-color: #22d3ee; }
+.ewa-fieldset { display: grid; gap: 10px; margin: 0; padding: 12px; border: 1px solid rgba(148,163,184,0.18); border-radius: 14px; }
+.ewa-fieldset legend { padding: 0 6px; color: var(--ewa-accent-2); font-weight: 900; font-size: 12px; }
+.ewa-fieldset label { display: flex; gap: 8px; align-items: center; color: #e2e8f0; font-size: 13px; }
+.ewa-fieldset input { accent-color: #22d3ee; }
+.ewa-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; transition: opacity 0.18s ease; }
+.ewa-form-grid.is-muted { opacity: 0.42; }
+.ewa-form-grid label { display: grid; gap: 6px; color: var(--ewa-muted); font-size: 12px; font-weight: 800; }
+.ewa-form-grid input,
+.ewa-form-grid select,
+.ewa-preset-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid rgba(148,163,184,0.2);
+  border-radius: 10px;
+  background: rgba(15,23,42,0.78);
+  color: #fff;
+  padding: 9px 10px;
+  outline: none;
+}
+.ewa-form-grid input:focus,
+.ewa-form-grid select:focus,
+.ewa-preset-input:focus { border-color: rgba(34,211,238,0.58); box-shadow: 0 0 0 3px rgba(34,211,238,0.12); }
+
 @media (max-width: 640px) {
   #ewa-drawer { top: 12px; right: 12px; left: 12px; width: auto; }
   .ewa-summary-grid { grid-template-columns: 1fr; }
+  .ewa-tabs { grid-template-columns: repeat(2, 1fr); }
+  .ewa-form-grid { grid-template-columns: 1fr; }
 }
 
 .ewa-novel-stage {

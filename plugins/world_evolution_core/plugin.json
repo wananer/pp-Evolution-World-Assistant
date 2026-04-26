@@ -1,7 +1,7 @@
 {
   "name": "world_evolution_core",
   "display_name": "Evolution World Assistant",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "enabled": true,
   "runtime": {
     "type": "plotpilot_plugin",
@@ -17,6 +17,8 @@
     "chapter_postprocess": true,
     "novel_prehistory": true,
     "story_planning_context": true,
+    "api2_control_card": true,
+    "api2_custom_provider": true,
     "manual_rebuild": true,
     "rollback": true,
     "chapter_review": true

@@ -1,6 +1,9 @@
 """PlotPilot-side workflow service for Evolution World Assistant."""
 from __future__ import annotations
 
+import asyncio
+import copy
+import threading
 from datetime import datetime, timezone
 from time import perf_counter
 from hashlib import sha256
@@ -17,6 +20,8 @@ from .repositories import RECENT_CONTEXT_FACT_LIMIT, EvolutionWorldRepository
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
 PLUGIN_NAME = "world_evolution_core"
+API2_PROVIDER_MODES = {"same_as_main", "custom"}
+API2_PROTOCOLS = {"openai", "anthropic", "gemini"}
 
 
 class EvolutionWorldAssistantService:
@@ -26,11 +31,25 @@ class EvolutionWorldAssistantService:
         jobs: Optional[PluginJobRegistry] = None,
         repository: Optional[EvolutionWorldRepository] = None,
         extractor_provider: Optional[StructuredExtractorProvider] = None,
+        api2_llm_service: Optional[Any] = None,
+        llm_provider_factory: Optional[Any] = None,
     ) -> None:
         self.storage = storage or PluginStorage()
         self.jobs = jobs or PluginJobRegistry(self.storage)
         self.repository = repository or EvolutionWorldRepository(self.storage)
         self.extractor_provider = extractor_provider
+        self.api2_llm_service = api2_llm_service
+        self.llm_provider_factory = llm_provider_factory
+
+    def get_settings(self, *, safe: bool = True) -> dict[str, Any]:
+        settings = _normalize_settings(self.repository.get_settings())
+        return _redact_settings(settings) if safe else settings
+
+    def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        existing = _normalize_settings(self.repository.get_settings())
+        settings = _normalize_settings(payload or {}, existing=existing)
+        self.repository.save_settings(settings)
+        return self.get_settings(safe=True)
 
     async def after_novel_created(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -254,6 +273,44 @@ class EvolutionWorldAssistantService:
         if not summary:
             return {"ok": True, "skipped": True, "reason": "no evolution state yet"}
 
+        content = summary
+        title = "Evolution World State"
+        metadata: dict[str, Any] = {
+            "novel_id": novel_id,
+            "chapter_number": chapter_number,
+            "patch_schema_version": patch.get("schema_version"),
+            "api2_control_card_enabled": False,
+        }
+        settings = self.get_settings(safe=False)
+        api2_settings = settings.get("api2_control_card") if isinstance(settings.get("api2_control_card"), dict) else {}
+        if api2_settings.get("enabled"):
+            control_card = self._build_api2_control_card(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                outline=outline,
+                raw_context=summary,
+                settings=api2_settings,
+            )
+            if control_card.get("ok") and control_card.get("content"):
+                content = str(control_card["content"]).strip()
+                title = "Evolution 写作控制卡"
+                metadata.update(
+                    {
+                        "api2_control_card_enabled": True,
+                        "api2_provider_mode": api2_settings.get("provider_mode"),
+                        "api2_raw_context_chars": len(summary),
+                        "api2_control_card_chars": len(content),
+                        "api2_compression_ratio": round(len(content) / max(len(summary), 1), 4),
+                    }
+                )
+            else:
+                metadata.update(
+                    {
+                        "api2_control_card_enabled": True,
+                        "api2_error": control_card.get("error") or control_card.get("reason") or "unknown",
+                    }
+                )
+
         injection_record = build_injection_record(
             novel_id=novel_id,
             chapter_number=chapter_number,
@@ -270,14 +327,99 @@ class EvolutionWorldAssistantService:
             "context_blocks": [
                 {
                     "plugin_name": PLUGIN_NAME,
-                    "title": "Evolution World State",
-                    "content": summary,
+                    "title": title,
+                    "content": content,
                     "priority": 60,
                     "token_budget": patch.get("estimated_token_budget") or 1200,
-                    "metadata": {"novel_id": novel_id, "chapter_number": chapter_number, "patch_schema_version": patch.get("schema_version")},
+                    "metadata": metadata,
                 }
             ],
         }
+
+    def _build_api2_control_card(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: Optional[int],
+        outline: str,
+        raw_context: str,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        started_at = _now()
+        if not raw_context.strip():
+            return {"ok": True, "skipped": True, "reason": "empty raw context"}
+        try:
+            llm_service = self._resolve_api2_llm_service(settings)
+            prompt = _build_api2_control_card_prompt(
+                chapter_number=chapter_number,
+                outline=outline,
+                raw_context=raw_context,
+            )
+            result = _run_async_blocking(
+                llm_service.generate(
+                    prompt,
+                    _make_generation_config(
+                        model=str(settings.get("model") or ""),
+                        max_tokens=_clamp_int(settings.get("max_tokens"), 256, 4096, 1400),
+                        temperature=_clamp_float(settings.get("temperature"), 0.0, 2.0, 0.2),
+                    ),
+                )
+            )
+            content = _clean_api2_control_card(result.content)
+            if not content:
+                return {"ok": False, "error": "api2 returned empty control card"}
+            finished_at = _now()
+            token_usage = getattr(result, "token_usage", None)
+            record = {
+                "at": finished_at,
+                "started_at": started_at,
+                "chapter_number": chapter_number,
+                "provider_mode": settings.get("provider_mode"),
+                "raw_context_chars": len(raw_context),
+                "control_card_chars": len(content),
+                "compression_ratio": round(len(content) / max(len(raw_context), 1), 4),
+                "model": str(settings.get("model") or ""),
+                "token_usage": _token_usage_to_dict(token_usage),
+            }
+            self.repository.append_context_control_card_record(novel_id, record)
+            self.repository.append_event(
+                novel_id,
+                {
+                    "type": "api2_control_card_built",
+                    "chapter_number": chapter_number,
+                    "raw_context_chars": len(raw_context),
+                    "control_card_chars": len(content),
+                    "at": finished_at,
+                },
+            )
+            return {"ok": True, "content": content, "record": record}
+        except Exception as exc:
+            self.repository.append_event(
+                novel_id,
+                {
+                    "type": "api2_control_card_failed",
+                    "chapter_number": chapter_number,
+                    "error": str(exc),
+                    "at": _now(),
+                },
+            )
+            return {"ok": False, "error": str(exc)}
+
+    def _resolve_api2_llm_service(self, settings: dict[str, Any]) -> Any:
+        if self.api2_llm_service is not None:
+            return self.api2_llm_service
+        if self.llm_provider_factory is None:
+            from infrastructure.ai.provider_factory import LLMProviderFactory
+
+            self.llm_provider_factory = LLMProviderFactory()
+        provider_mode = str(settings.get("provider_mode") or "same_as_main")
+        if provider_mode == "custom":
+            from application.ai.llm_control_service import LLMProfile
+
+            profile_payload = settings.get("custom_profile") if isinstance(settings.get("custom_profile"), dict) else {}
+            profile = LLMProfile(**_custom_profile_for_llm(profile_payload))
+            return self.llm_provider_factory.create_from_profile(profile)
+        return self.llm_provider_factory.create_active_provider()
 
     def before_chapter_review(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -1309,6 +1451,219 @@ def _has_transition_marker(content: str) -> bool:
         "证据",
     ]
     return any(marker in content for marker in markers)
+
+
+def _default_settings() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "api2_control_card": {
+            "enabled": False,
+            "provider_mode": "same_as_main",
+            "model": "",
+            "temperature": 0.2,
+            "max_tokens": 1400,
+            "custom_profile": {
+                "id": "evolution-api2-custom",
+                "name": "Evolution API2",
+                "preset_key": "custom-openai-compatible",
+                "protocol": "openai",
+                "base_url": "",
+                "api_key": "",
+                "model": "",
+                "temperature": 0.2,
+                "max_tokens": 1400,
+                "timeout_seconds": 180,
+                "extra_headers": {},
+                "extra_query": {},
+                "extra_body": {},
+                "notes": "Evolution 控制卡压缩专用 API",
+                "use_legacy_chat_completions": False,
+            },
+        },
+    }
+
+
+def _normalize_settings(raw: dict[str, Any], *, existing: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    base = _default_settings()
+    if existing:
+        base = _deep_merge(base, existing)
+    if isinstance(raw, dict):
+        base = _deep_merge(base, raw)
+    api2 = base["api2_control_card"]
+    api2["enabled"] = bool(api2.get("enabled"))
+    provider_mode = str(api2.get("provider_mode") or "same_as_main")
+    api2["provider_mode"] = provider_mode if provider_mode in API2_PROVIDER_MODES else "same_as_main"
+    api2["temperature"] = _clamp_float(api2.get("temperature"), 0.0, 2.0, 0.2)
+    api2["max_tokens"] = _clamp_int(api2.get("max_tokens"), 256, 4096, 1400)
+    custom = _custom_profile_for_storage(api2.get("custom_profile") if isinstance(api2.get("custom_profile"), dict) else {})
+    if existing:
+        prior = ((existing.get("api2_control_card") or {}).get("custom_profile") or {}) if isinstance(existing, dict) else {}
+        submitted_key = str(custom.get("api_key") or "")
+        if submitted_key in {"", "********", "••••••••"}:
+            custom["api_key"] = str(prior.get("api_key") or "")
+    api2["custom_profile"] = custom
+    if api2["provider_mode"] == "custom":
+        api2["model"] = custom.get("model") or ""
+        api2["temperature"] = custom.get("temperature", api2["temperature"])
+        api2["max_tokens"] = custom.get("max_tokens", api2["max_tokens"])
+    return base
+
+
+def _redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    safe = copy.deepcopy(settings)
+    custom = ((safe.get("api2_control_card") or {}).get("custom_profile") or {})
+    api_key = str(custom.get("api_key") or "")
+    custom["api_key"] = ""
+    custom["api_key_configured"] = bool(api_key)
+    return safe
+
+
+def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in (incoming or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _custom_profile_for_storage(raw: dict[str, Any]) -> dict[str, Any]:
+    protocol = str(raw.get("protocol") or "openai").strip()
+    if protocol not in API2_PROTOCOLS:
+        protocol = "openai"
+    return {
+        "id": str(raw.get("id") or "evolution-api2-custom").strip() or "evolution-api2-custom",
+        "name": str(raw.get("name") or "Evolution API2").strip() or "Evolution API2",
+        "preset_key": str(raw.get("preset_key") or "custom-openai-compatible").strip() or "custom-openai-compatible",
+        "protocol": protocol,
+        "base_url": str(raw.get("base_url") or "").strip(),
+        "api_key": str(raw.get("api_key") or "").strip(),
+        "model": str(raw.get("model") or "").strip(),
+        "temperature": _clamp_float(raw.get("temperature"), 0.0, 2.0, 0.2),
+        "max_tokens": _clamp_int(raw.get("max_tokens"), 256, 4096, 1400),
+        "timeout_seconds": _clamp_int(raw.get("timeout_seconds"), 10, 900, 180),
+        "extra_headers": raw.get("extra_headers") if isinstance(raw.get("extra_headers"), dict) else {},
+        "extra_query": raw.get("extra_query") if isinstance(raw.get("extra_query"), dict) else {},
+        "extra_body": raw.get("extra_body") if isinstance(raw.get("extra_body"), dict) else {},
+        "notes": str(raw.get("notes") or "Evolution 控制卡压缩专用 API"),
+        "use_legacy_chat_completions": bool(raw.get("use_legacy_chat_completions")),
+    }
+
+
+def _custom_profile_for_llm(raw: dict[str, Any]) -> dict[str, Any]:
+    return _custom_profile_for_storage(raw)
+
+
+def _build_api2_control_card_prompt(*, chapter_number: Optional[int], outline: str, raw_context: str) -> Any:
+    system = (
+        "你是 Evolution 插件的状态压缩器，不写正文。"
+        "你只把冗长世界状态压缩成给正文作者使用的本章写作控制卡。"
+    )
+    user = f"""【本章】
+第{chapter_number or '-'}章
+
+【本章大纲】
+{outline or '无'}
+
+【原始 Evolution 上下文】
+{raw_context}
+
+请输出中文控制卡，建议 900-1300 字符，必须包含：
+1. 上一章结尾必须承接的状态。
+2. 本章硬约束与禁写事项。
+3. 角色信息边界：谁知道什么，谁不能提前知道什么。
+4. 本章剧情推进目标。
+5. 禁用重复模板：不要使用“没有说话/没有回答/没有立刻回答/沉默了几秒/盯着屏幕看了几秒/呼吸停了一拍”等。
+6. 替代表现方式：具体动作、环境反应、技术操作、心理判断、场面调度。
+7. 文风适配提醒：根据原始上下文和本章题材调整措辞，不固定成某一种文风。
+
+只输出控制卡，不要写正文、标题、解释或评分。"""
+    try:
+        from domain.ai.value_objects.prompt import Prompt
+
+        return Prompt(system=system, user=user)
+    except Exception:
+        class PromptFallback:
+            def __init__(self, system: str, user: str) -> None:
+                self.system = system
+                self.user = user
+
+        return PromptFallback(system=system, user=user)
+
+
+def _make_generation_config(*, model: str, max_tokens: int, temperature: float) -> Any:
+    try:
+        from domain.ai.services.llm_service import GenerationConfig
+
+        return GenerationConfig(model=model, max_tokens=max_tokens, temperature=temperature)
+    except Exception:
+        class GenerationConfigFallback:
+            def __init__(self, model: str, max_tokens: int, temperature: float) -> None:
+                self.model = model
+                self.max_tokens = max_tokens
+                self.temperature = temperature
+
+        return GenerationConfigFallback(model=model, max_tokens=max_tokens, temperature=temperature)
+
+
+def _clean_api2_control_card(content: str) -> str:
+    text = str(content or "").strip()
+    text = text.removeprefix("```markdown").removeprefix("```text").removeprefix("```").strip()
+    text = text.removesuffix("```").strip()
+    return text
+
+
+def _token_usage_to_dict(token_usage: Any) -> dict[str, int]:
+    if token_usage is None:
+        return {}
+    if hasattr(token_usage, "to_dict"):
+        data = token_usage.to_dict()
+        return data if isinstance(data, dict) else {}
+    return {
+        "input_tokens": int(getattr(token_usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(token_usage, "output_tokens", 0) or 0),
+        "total_tokens": int(getattr(token_usage, "total_tokens", 0) or 0),
+    }
+
+
+def _run_async_blocking(awaitable):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+
+    box: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            box["result"] = asyncio.run(awaitable)
+        except BaseException as exc:  # pragma: no cover - defensive bridge
+            box["error"] = exc
+
+    thread = threading.Thread(target=runner, name="evolution-api2-control-card", daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
+def _clamp_int(value: Any, low: int, high: int, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def _clamp_float(value: Any, low: float, high: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
 
 def _extract_content(payload: dict[str, Any]) -> str:
     nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}

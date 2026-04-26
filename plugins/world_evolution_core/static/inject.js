@@ -11,6 +11,7 @@
     viewMode: 'novel',
     selectedCharacterId: null,
     lastPayload: null,
+    settingsMessage: '',
   };
 
   function ensurePanel() {
@@ -44,6 +45,7 @@
         <button type="button" data-tab="characters" class="active">角色卡</button>
         <button type="button" data-tab="events">世界线</button>
         <button type="button" data-tab="status">运行态</button>
+        <button type="button" data-tab="settings">设置</button>
       </nav>
       <main data-content class="ewa-content">加载中...</main>
       <footer class="ewa-footer">
@@ -74,14 +76,15 @@
       return;
     }
     try {
-      const [characters, status, runs, snapshots, importedFlows] = await Promise.all([
+      const [characters, status, runs, snapshots, importedFlows, settings] = await Promise.all([
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/characters`),
         runtime.fetchJson('/api/v1/plugins/evolution-world/status'),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/runs?limit=8`),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/snapshots`),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/imported-flows`),
+        runtime.fetchJson('/api/v1/plugins/evolution-world/settings'),
       ]);
-      state.lastPayload = { novelId, characters, status, runs, snapshots, importedFlows };
+      state.lastPayload = { novelId, characters, status, runs, snapshots, importedFlows, settings };
       renderPanel(drawer);
     } catch (error) {
       console.warn('[EvolutionWorld] panel request failed:', error);
@@ -96,6 +99,7 @@
     }
     if (state.activeTab === 'events') return renderEvents(drawer, state.lastPayload);
     if (state.activeTab === 'status') return renderStatus(drawer, state.lastPayload);
+    if (state.activeTab === 'settings') return renderSettings(drawer, state.lastPayload);
     return renderCharacters(drawer, state.lastPayload);
   }
 
@@ -457,6 +461,120 @@
       </section>
     `;
     bindStatusInteractions(content, runs, snapshots);
+  }
+
+  function renderSettings(drawer, payload) {
+    const content = drawer.querySelector('[data-content]');
+    const settings = payload.settings?.settings || {};
+    const api2 = settings.api2_control_card || {};
+    const custom = api2.custom_profile || {};
+    const providerMode = api2.provider_mode || 'same_as_main';
+    content.innerHTML = `
+      <section class="ewa-section ewa-settings-section">
+        <div class="ewa-section-head">
+          <h3>API2 控制卡</h3>
+          <p>压缩 Evolution 上下文，减轻正文 API 负担</p>
+        </div>
+        <form class="ewa-settings-form" data-api2-settings-form>
+          <label class="ewa-switch-row">
+            <input type="checkbox" name="enabled" ${api2.enabled ? 'checked' : ''}>
+            <span>启用 API2 写作控制卡</span>
+          </label>
+          <fieldset class="ewa-fieldset">
+            <legend>调用方式</legend>
+            <label><input type="radio" name="provider_mode" value="same_as_main" ${providerMode !== 'custom' ? 'checked' : ''}> 与主 API 使用同一配置</label>
+            <label><input type="radio" name="provider_mode" value="custom" ${providerMode === 'custom' ? 'checked' : ''}> 使用 Evolution 自定义 API</label>
+          </fieldset>
+          <div class="ewa-form-grid" data-api2-custom-fields>
+            <label>协议
+              <select name="protocol">
+                ${['openai', 'anthropic', 'gemini'].map((item) => `<option value="${item}" ${custom.protocol === item ? 'selected' : ''}>${item}</option>`).join('')}
+              </select>
+            </label>
+            <label>Base URL
+              <input name="base_url" value="${escapeAttr(custom.base_url || '')}" placeholder="https://api.example.com/v1">
+            </label>
+            <label>模型名
+              <input name="model" value="${escapeAttr(custom.model || '')}" placeholder="用于压缩控制卡的模型">
+            </label>
+            <label>API Key
+              <input name="api_key" type="password" value="" placeholder="${custom.api_key_configured ? '已保存，留空则继续使用' : '输入自定义 API Key'}">
+            </label>
+            <label>温度
+              <input name="temperature" type="number" min="0" max="2" step="0.1" value="${escapeAttr(custom.temperature ?? api2.temperature ?? 0.2)}">
+            </label>
+            <label>最大输出 Token
+              <input name="max_tokens" type="number" min="256" max="4096" step="1" value="${escapeAttr(custom.max_tokens ?? api2.max_tokens ?? 1400)}">
+            </label>
+            <label>超时秒数
+              <input name="timeout_seconds" type="number" min="10" max="900" step="10" value="${escapeAttr(custom.timeout_seconds ?? 180)}">
+            </label>
+          </div>
+          <div class="ewa-action-row">
+            <button type="submit" class="ewa-mini-action">保存设置</button>
+            <span class="ewa-import-message" data-settings-message>${escapeHtml(state.settingsMessage || '')}</span>
+          </div>
+        </form>
+      </section>
+    `;
+    bindSettingsInteractions(content);
+  }
+
+  function bindSettingsInteractions(root) {
+    const form = root.querySelector('[data-api2-settings-form]');
+    if (!form) return;
+    const syncCustomVisibility = () => {
+      const mode = form.querySelector('input[name="provider_mode"]:checked')?.value || 'same_as_main';
+      form.querySelector('[data-api2-custom-fields]')?.classList.toggle('is-muted', mode !== 'custom');
+    };
+    form.querySelectorAll('input[name="provider_mode"]').forEach((item) => item.addEventListener('change', syncCustomVisibility));
+    syncCustomVisibility();
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button[type="submit"]');
+      const message = form.querySelector('[data-settings-message]');
+      const mode = form.querySelector('input[name="provider_mode"]:checked')?.value || 'same_as_main';
+      const payload = {
+        api2_control_card: {
+          enabled: Boolean(form.elements.enabled?.checked),
+          provider_mode: mode,
+          temperature: Number(form.elements.temperature?.value || 0.2),
+          max_tokens: Number(form.elements.max_tokens?.value || 1400),
+          custom_profile: {
+            protocol: form.elements.protocol?.value || 'openai',
+            base_url: form.elements.base_url?.value || '',
+            api_key: form.elements.api_key?.value || '',
+            model: form.elements.model?.value || '',
+            temperature: Number(form.elements.temperature?.value || 0.2),
+            max_tokens: Number(form.elements.max_tokens?.value || 1400),
+            timeout_seconds: Number(form.elements.timeout_seconds?.value || 180),
+          },
+        },
+      };
+      button.disabled = true;
+      button.textContent = '保存中...';
+      try {
+        const response = await fetch('/api/v1/plugins/evolution-world/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(`Settings save failed: ${response.status}`);
+        const saved = await response.json();
+        state.lastPayload.settings = saved;
+        state.settingsMessage = '已保存。下一次上下文注入生效。';
+      } catch (error) {
+        state.settingsMessage = String(error);
+      } finally {
+        button.disabled = false;
+        button.textContent = '保存设置';
+        message.textContent = state.settingsMessage;
+        window.setTimeout(() => {
+          state.settingsMessage = '';
+          if (message) message.textContent = '';
+        }, 3200);
+      }
+    });
   }
 
   function renderImportedFlowCard(flow) {
