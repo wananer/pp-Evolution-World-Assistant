@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import copy
+import json
+import logging
 import threading
 from datetime import datetime, timezone
 from time import perf_counter
@@ -11,18 +14,40 @@ from typing import Any, Optional, Union, Tuple
 from urllib.parse import urlparse, urlunparse
 
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
+from plugins.platform.host_database import ReadOnlyHostDatabase, create_default_readonly_host_database
 from plugins.platform.plugin_storage import PluginStorage
 
+from .agent_assets import (
+    build_commit_event,
+    build_reflection_record,
+    build_selection_event,
+    consolidate_agent_memory,
+    evaluate_strategy_effectiveness,
+    extract_context_signals,
+    select_agent_assets,
+    solidify_capsules_from_review,
+)
+from .canonical_characters import (
+    calibrate_extracted_characters,
+    canonicalize_names_in_records,
+    load_canonical_characters,
+)
 from .continuity import build_chapter_summary, build_volume_summary
 from .context_capsules import build_injection_record
 from .context_patch import build_context_patch, render_patch_summary
+from .diagnostics_service import DiagnosticsService
+from .host_context import HOST_CONTEXT_SOURCES, HostContextReader
+from .local_semantic_memory import LocalSemanticMemory
 from .preset_converter import convert_st_preset
 from .repositories import RECENT_CONTEXT_FACT_LIMIT, EvolutionWorldRepository
+from .story_graph import build_global_route_map, build_story_graph_chapter
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
 PLUGIN_NAME = "world_evolution_core"
-API2_PROVIDER_MODES = {"same_as_main", "custom"}
-API2_PROTOCOLS = {"openai", "anthropic", "gemini"}
+LLM_PROVIDER_MODES = {"same_as_main", "custom"}
+LLM_MODEL_PROTOCOLS = {"openai", "anthropic", "gemini"}
+CONTEXT_EXTERNAL_TIMEOUT_SECONDS = 2.5
+logger = logging.getLogger(__name__)
 
 
 class EvolutionWorldAssistantService:
@@ -32,15 +57,24 @@ class EvolutionWorldAssistantService:
         jobs: Optional[PluginJobRegistry] = None,
         repository: Optional[EvolutionWorldRepository] = None,
         extractor_provider: Optional[StructuredExtractorProvider] = None,
-        api2_llm_service: Optional[Any] = None,
+        agent_llm_service: Optional[Any] = None,
         llm_provider_factory: Optional[Any] = None,
+        host_database: Optional[ReadOnlyHostDatabase] = None,
+        semantic_memory: Optional[LocalSemanticMemory] = None,
     ) -> None:
         self.storage = storage or PluginStorage()
         self.jobs = jobs or PluginJobRegistry(self.storage)
         self.repository = repository or EvolutionWorldRepository(self.storage)
         self.extractor_provider = extractor_provider
-        self.api2_llm_service = api2_llm_service
+        self.agent_llm_service = agent_llm_service
         self.llm_provider_factory = llm_provider_factory
+        self.host_database = host_database if host_database is not None else create_default_readonly_host_database()
+        self.semantic_memory = semantic_memory or LocalSemanticMemory(host_database=self.host_database)
+        self.host_context_reader = HostContextReader(self.host_database)
+        self.diagnostics_service = DiagnosticsService(
+            repository=self.repository,
+            route_map_provider=self.get_global_route_map,
+        )
 
     def get_settings(self, *, safe: bool = True) -> dict[str, Any]:
         settings = _normalize_settings(self.repository.get_settings())
@@ -53,9 +87,24 @@ class EvolutionWorldAssistantService:
         return self.get_settings(safe=True)
 
     async def fetch_api2_models(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Fetch model names for the API2 settings form without exposing stored keys."""
-        request = _build_api2_models_request(payload, self.get_settings(safe=False))
-        items = await _fetch_api2_model_items(request)
+        """Deprecated compatibility endpoint; API2 no longer performs Evolution work."""
+        return self.deprecated_api2_response()
+
+    def deprecated_api2_response(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "deprecated": True,
+            "items": [],
+            "count": 0,
+            "source": "legacy_api2",
+            "protocol": None,
+            "error": "API2 is deprecated. Configure settings.agent_api for Evolution control cards and reflections.",
+            "replacement": "agent_api",
+        }
+
+    async def fetch_agent_models(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = _build_agent_models_request(payload, self.get_settings(safe=False))
+        items = await _fetch_model_list_items(request)
         return {
             "ok": True,
             "items": items,
@@ -65,13 +114,15 @@ class EvolutionWorldAssistantService:
         }
 
     async def test_api2_connection(self, payload: dict[str, Any]) -> dict[str, Any]:
-        settings = _api2_runtime_settings_from_payload(payload, self.get_settings(safe=False))
+        return self.deprecated_api2_response()
+
+    async def test_agent_connection(self, payload: dict[str, Any]) -> dict[str, Any]:
+        settings = _agent_runtime_settings_from_payload(payload, self.get_settings(safe=False))
         started = perf_counter()
         try:
-            llm_service = self._resolve_api2_llm_service(settings)
-            prompt = _build_api2_test_prompt()
+            llm_service = self._resolve_agent_llm_service(settings)
             result = await llm_service.generate(
-                prompt,
+                _build_llm_connection_test_prompt(),
                 _make_generation_config(
                     model=str(settings.get("model") or ""),
                     max_tokens=32,
@@ -220,8 +271,29 @@ class EvolutionWorldAssistantService:
             provider=self.extractor_provider,
         )
         snapshot = extraction.snapshot
+        canonical_characters = load_canonical_characters(self.host_database, novel_id)
+        calibration = calibrate_extracted_characters(
+            content=content,
+            snapshot_characters=snapshot.characters,
+            character_updates=[item.to_dict() for item in extraction.character_updates],
+            canonical_characters=canonical_characters,
+        )
+        snapshot.characters = calibration.characters
+        character_updates = calibration.character_updates
+        if calibration.warnings:
+            extraction.warnings.extend(calibration.warnings)
+        snapshot.characters = _filter_snapshot_characters(snapshot.characters)
+        snapshot.locations = _filter_snapshot_locations(snapshot.locations)
+        character_updates = [
+            item
+            for item in character_updates
+            if _valid_snapshot_character_name(str(item.get("name") or ""))
+        ]
         chapter_summary = build_chapter_summary(novel_id, chapter_number, content, _now())
         known_names = [card.get("name") for card in self.repository.list_character_index(novel_id).get("items", [])]
+        if canonical_characters:
+            canonical_names = {item.name for item in canonical_characters}
+            known_names = [name for name in known_names if name in canonical_names]
         for name in known_names:
             if name and name in content and name not in snapshot.characters:
                 snapshot.characters.append(name)
@@ -237,16 +309,62 @@ class EvolutionWorldAssistantService:
         updated_cards = self.repository.upsert_character_cards(
             novel_id,
             snapshot,
-            [item.to_dict() for item in extraction.character_updates],
+            character_updates,
         )
-        timeline_events = _build_timeline_events(snapshot, extraction.to_dict(), content_hash, _now())
+        extraction_payload = extraction.to_dict()
+        extraction_payload["snapshot"] = snapshot.to_dict()
+        extraction_payload["character_updates"] = character_updates
+        extraction_payload["canonical_character_count"] = calibration.canonical_count
+        extraction_payload["ignored_character_candidates"] = calibration.ignored_candidates
+        if canonical_characters:
+            extraction_payload["world_events"] = canonicalize_names_in_records(
+                extraction_payload.get("world_events") or [],
+                canonical_characters,
+            )
+        timeline_events = _build_timeline_events(snapshot, extraction_payload, content_hash, _now())
         self.repository.save_timeline_events(novel_id, timeline_events)
         self.repository.save_continuity_constraints(
             novel_id,
             _build_continuity_constraints(novel_id, updated_cards, snapshot.chapter_number, timeline_events),
         )
+        previous_graph_chapters = self.repository.list_story_graph_chapters(novel_id, before_chapter=chapter_number)
+        story_graph_chapter = build_story_graph_chapter(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            snapshot=snapshot.to_dict(),
+            chapter_summary=chapter_summary,
+            timeline_events=timeline_events,
+            previous_chapters=previous_graph_chapters,
+            at=_now(),
+        )
+        self.repository.save_story_graph_chapter(novel_id, chapter_number, story_graph_chapter)
+        style_repetition_state = _build_style_repetition_state(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content=content,
+            recent_summaries=self.repository.list_chapter_summaries(novel_id, limit=3),
+            at=_now(),
+        )
+        if style_repetition_state.get("phrases"):
+            self.repository.save_style_repetition_state(novel_id, style_repetition_state)
+        native_after_commit = self._read_native_after_commit_context(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content=content,
+        )
+        extraction_payload["native_after_commit"] = native_after_commit
+        extraction_payload["fallback_degraded"] = bool(native_after_commit.get("fallback_degraded"))
         finished_at = _now()
         duration_ms = int((perf_counter() - start_time) * 1000)
+        agent_event = build_commit_event(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content_hash=content_hash,
+            snapshot=snapshot.to_dict(),
+            story_graph=story_graph_chapter,
+            at=finished_at,
+        )
+        self.repository.append_agent_event(novel_id, agent_event)
         self.repository.append_event(
             novel_id,
             {"type": "chapter_committed", "chapter_number": chapter_number, "content_hash": content_hash, "at": finished_at},
@@ -274,6 +392,12 @@ class EvolutionWorldAssistantService:
                     "replaced_existing_snapshot": bool(previous_snapshot),
                     "chapter_summary_saved": True,
                     "volume_summary_saved": bool(volume_summary),
+                    "story_graph_saved": True,
+                    "style_repetition_phrase_count": len(style_repetition_state.get("phrases") or []),
+                    "route_edge_count": len(story_graph_chapter.get("route_edges") or []),
+                    "route_conflict_count": len(story_graph_chapter.get("conflicts") or []),
+                    "native_after_commit": native_after_commit,
+                    "agent_event_id": agent_event.get("id"),
                 },
             },
         )
@@ -291,7 +415,9 @@ class EvolutionWorldAssistantService:
                 output_json={
                     "facts_path": f"facts/chapter_{chapter_number}.json",
                     "summary_path": f"summaries/chapters/chapter_{chapter_number}.json",
+                    "story_graph_path": f"story_graph/chapters/chapter_{chapter_number}.json",
                     "characters_updated": [card.get("character_id") for card in updated_cards],
+                    "native_after_commit": native_after_commit,
                 },
             )
         )
@@ -302,7 +428,9 @@ class EvolutionWorldAssistantService:
                 "chapter_summary": chapter_summary,
                 "volume_summary": volume_summary,
                 "characters_updated": updated_cards,
-                "extraction": extraction.to_dict(),
+                "extraction": extraction_payload,
+                "story_graph": story_graph_chapter,
+                "native_after_commit": native_after_commit,
             },
         }
 
@@ -325,34 +453,35 @@ class EvolutionWorldAssistantService:
             "chapter_number": chapter_number,
             "patch_schema_version": patch.get("schema_version"),
             "api2_control_card_enabled": False,
+            "agent_control_card_enabled": False,
         }
         settings = self.get_settings(safe=False)
-        api2_settings = settings.get("api2_control_card") if isinstance(settings.get("api2_control_card"), dict) else {}
-        if api2_settings.get("enabled"):
-            control_card = self._build_api2_control_card(
+        agent_settings = settings.get("agent_api") if isinstance(settings.get("agent_api"), dict) else {}
+        if agent_settings.get("enabled"):
+            control_card = self._build_agent_control_card(
                 novel_id=novel_id,
                 chapter_number=chapter_number,
                 outline=outline,
                 raw_context=summary,
-                settings=api2_settings,
+                settings=agent_settings,
             )
             if control_card.get("ok") and control_card.get("content"):
                 content = str(control_card["content"]).strip()
-                title = "Evolution 写作控制卡"
+                title = "Evolution 智能体写作控制卡"
                 metadata.update(
                     {
-                        "api2_control_card_enabled": True,
-                        "api2_provider_mode": api2_settings.get("provider_mode"),
-                        "api2_raw_context_chars": len(summary),
-                        "api2_control_card_chars": len(content),
-                        "api2_compression_ratio": round(len(content) / max(len(summary), 1), 4),
+                        "agent_control_card_enabled": True,
+                        "agent_provider_mode": agent_settings.get("provider_mode"),
+                        "agent_raw_context_chars": len(summary),
+                        "agent_control_card_chars": len(content),
+                        "agent_compression_ratio": round(len(content) / max(len(summary), 1), 4),
                     }
                 )
             else:
                 metadata.update(
                     {
-                        "api2_control_card_enabled": True,
-                        "api2_error": control_card.get("error") or control_card.get("reason") or "unknown",
+                        "agent_control_card_enabled": True,
+                        "agent_error": control_card.get("error") or control_card.get("reason") or "unknown",
                     }
                 )
 
@@ -364,6 +493,10 @@ class EvolutionWorldAssistantService:
             at=_now(),
         )
         self.repository.append_context_injection_record(novel_id, injection_record)
+        agent_selection = patch.get("agent_selection") if isinstance(patch.get("agent_selection"), dict) else {}
+        if agent_selection and (agent_selection.get("selected_gene_ids") or agent_selection.get("selected_capsule_ids")):
+            self.repository.append_agent_selection_record(novel_id, agent_selection)
+            self.repository.append_agent_event(novel_id, build_selection_event(agent_selection))
 
         return {
             "ok": True,
@@ -381,7 +514,7 @@ class EvolutionWorldAssistantService:
             ],
         }
 
-    def _build_api2_control_card(
+    def _build_agent_control_card(
         self,
         *,
         novel_id: str,
@@ -394,8 +527,8 @@ class EvolutionWorldAssistantService:
         if not raw_context.strip():
             return {"ok": True, "skipped": True, "reason": "empty raw context"}
         try:
-            llm_service = self._resolve_api2_llm_service(settings)
-            prompt = _build_api2_control_card_prompt(
+            llm_service = self._resolve_agent_llm_service(settings)
+            prompt = _build_agent_control_card_prompt(
                 chapter_number=chapter_number,
                 outline=outline,
                 raw_context=raw_context,
@@ -405,14 +538,14 @@ class EvolutionWorldAssistantService:
                     prompt,
                     _make_generation_config(
                         model=str(settings.get("model") or ""),
-                        max_tokens=_clamp_int(settings.get("max_tokens"), 256, 4096, 1400),
-                        temperature=_clamp_float(settings.get("temperature"), 0.0, 2.0, 0.2),
+                        max_tokens=_clamp_int(settings.get("max_tokens"), 256, 4096, 1200),
+                        temperature=_clamp_float(settings.get("temperature"), 0.0, 2.0, 0.1),
                     ),
                 )
             )
-            content = _clean_api2_control_card(result.content)
+            content = _clean_control_card(result.content)
             if not content:
-                return {"ok": False, "error": "api2 returned empty control card"}
+                return {"ok": False, "error": "agent api returned empty control card"}
             finished_at = _now()
             token_usage = getattr(result, "token_usage", None)
             record = {
@@ -420,6 +553,7 @@ class EvolutionWorldAssistantService:
                 "started_at": started_at,
                 "chapter_number": chapter_number,
                 "provider_mode": settings.get("provider_mode"),
+                "source": "agent_api",
                 "raw_context_chars": len(raw_context),
                 "control_card_chars": len(content),
                 "compression_ratio": round(len(content) / max(len(raw_context), 1), 4),
@@ -427,32 +561,48 @@ class EvolutionWorldAssistantService:
                 "token_usage": _token_usage_to_dict(token_usage),
             }
             self.repository.append_context_control_card_record(novel_id, record)
-            self.repository.append_event(
+            self.repository.append_agent_event(
                 novel_id,
                 {
-                    "type": "api2_control_card_built",
+                    "type": "EvolutionEvent",
+                    "schema_version": 1,
+                    "id": f"evt_agent_control_card_{_hash_text(novel_id + str(chapter_number or '') + finished_at)}",
+                    "intent": "control_card",
+                    "hook_name": "before_context_build",
+                    "novel_id": novel_id,
                     "chapter_number": chapter_number,
-                    "raw_context_chars": len(raw_context),
-                    "control_card_chars": len(content),
-                    "at": finished_at,
+                    "signals": ["agent_api", "context_compression", "control_card"],
+                    "genes_used": [],
+                    "capsule_id": None,
+                    "outcome": {"status": "success", "control_card_chars": len(content)},
+                    "meta": {"at": finished_at, "model": str(settings.get("model") or "")},
                 },
             )
             return {"ok": True, "content": content, "record": record}
         except Exception as exc:
-            self.repository.append_event(
+            failed_at = _now()
+            self.repository.append_agent_event(
                 novel_id,
                 {
-                    "type": "api2_control_card_failed",
+                    "type": "EvolutionEvent",
+                    "schema_version": 1,
+                    "id": f"evt_agent_control_card_failed_{_hash_text(novel_id + str(chapter_number or '') + failed_at)}",
+                    "intent": "control_card",
+                    "hook_name": "before_context_build",
+                    "novel_id": novel_id,
                     "chapter_number": chapter_number,
-                    "error": str(exc),
-                    "at": _now(),
+                    "signals": ["agent_api", "context_compression", "control_card"],
+                    "genes_used": [],
+                    "capsule_id": None,
+                    "outcome": {"status": "failed", "error": str(exc)},
+                    "meta": {"at": failed_at},
                 },
             )
             return {"ok": False, "error": str(exc)}
 
-    def _resolve_api2_llm_service(self, settings: dict[str, Any]) -> Any:
-        if self.api2_llm_service is not None:
-            return self.api2_llm_service
+    def _resolve_agent_llm_service(self, settings: dict[str, Any]) -> Any:
+        if self.agent_llm_service is not None:
+            return self.agent_llm_service
         if self.llm_provider_factory is None:
             from infrastructure.ai.provider_factory import LLMProviderFactory
 
@@ -484,6 +634,7 @@ class EvolutionWorldAssistantService:
                 "evidence": evidence.get("events", []),
                 "constraints": evidence.get("constraints", []),
                 "characters": evidence.get("characters", []),
+                "route_conflicts": evidence.get("route_conflicts", []),
             },
         }
 
@@ -534,6 +685,7 @@ class EvolutionWorldAssistantService:
 
         removed = self.repository.delete_fact_snapshot(novel_id, chapter_number)
         self.repository.delete_chapter_summary(novel_id, chapter_number)
+        self.repository.delete_story_graph_chapter(novel_id, chapter_number)
         cards = self.repository.rebuild_character_cards_from_facts(novel_id)
         event = {
             "type": "chapter_rollback",
@@ -592,8 +744,23 @@ class EvolutionWorldAssistantService:
     def list_continuity_constraints(self, novel_id: str, limit: int = 80) -> dict[str, Any]:
         return {"items": self.repository.list_continuity_constraints(novel_id, limit=limit)}
 
+    def get_global_route_map(self, novel_id: str) -> dict[str, Any]:
+        return build_global_route_map(novel_id, self.repository.list_story_graph_chapters(novel_id))
+
+    def list_story_graph_chapters(self, novel_id: str, limit: int = 50) -> dict[str, Any]:
+        return {"items": self.repository.list_story_graph_chapters(novel_id, limit=limit)}
+
+    def list_route_conflicts(self, novel_id: str, limit: int = 80) -> dict[str, Any]:
+        return {"items": self.repository.list_route_conflicts(novel_id, limit=limit)}
+
     def list_review_records(self, novel_id: str, limit: int = 30) -> dict[str, Any]:
         return {"items": self.repository.list_review_records(novel_id, limit=limit)}
+
+    def get_agent_status(self, novel_id: str) -> dict[str, Any]:
+        return self.repository.get_agent_status(novel_id)
+
+    def get_diagnostics(self, novel_id: str) -> dict[str, Any]:
+        return self.diagnostics_service.get_diagnostics(novel_id)
 
     def list_snapshots(self, novel_id: str) -> dict[str, Any]:
         return {"items": self.repository.list_fact_snapshots(novel_id)}
@@ -630,7 +797,7 @@ class EvolutionWorldAssistantService:
         mentioned_cards = [card for card in cards if _character_is_mentioned(card, content)]
         for card in mentioned_cards:
             issues.extend(
-                _attach_issue_evidence(
+            _attach_issue_evidence(
                     _review_character_card_against_content(card, content, chapter_number),
                     evidence,
                     subject=str(card.get("name") or ""),
@@ -657,8 +824,45 @@ class EvolutionWorldAssistantService:
                 )
             )
 
+        route_issues = _review_route_conflicts(evidence.get("route_conflicts") or [], chapter_number)
+        if route_issues:
+            issues.extend(_attach_issue_evidence(route_issues, evidence, subject=""))
+        all_cards = (
+            self.repository.list_all_character_cards(novel_id).get("items", [])
+            if hasattr(self.repository, "list_all_character_cards")
+            else self.repository.list_character_cards(novel_id).get("items", [])
+        )
+        pollution_issues = _review_extraction_pollution(
+            all_cards,
+            facts,
+            chapter_number,
+        )
+        if pollution_issues:
+            issues.extend(pollution_issues)
+        boundary_issues = _review_boundary_state(
+            self.repository.list_chapter_summaries(novel_id, before_chapter=chapter_number, limit=1),
+            content,
+            chapter_number,
+        )
+        if boundary_issues:
+            issues.extend(boundary_issues)
+        repetition_issues = _review_style_repetition(content, chapter_number)
+        if repetition_issues:
+            issues.extend(repetition_issues)
+        host_context = self.host_context_reader.read(
+            novel_id,
+            query=content[:1200],
+            before_chapter=chapter_number,
+            limit=6,
+        )
+        self.repository.save_host_context_summary(novel_id, self.host_context_reader.summary(host_context))
+        host_issues = _review_host_context_against_content(host_context, content, chapter_number)
+        if host_issues:
+            issues.extend(host_issues)
+
         if issues:
             suggestions.append("Evolution 建议优先补足角色得知信息、能力越界或误信被修正的过渡，而不是直接删除剧情推进。")
+        issues = [_normalize_evolution_issue_metadata(item) for item in issues if isinstance(item, dict)]
 
         return {
             "ok": True,
@@ -668,6 +872,8 @@ class EvolutionWorldAssistantService:
                 "reviewed_characters": [card.get("name") for card in mentioned_cards],
                 "evidence": evidence.get("events", []),
                 "constraints": evidence.get("constraints", []),
+                "route_conflicts": evidence.get("route_conflicts", []),
+                "host_context": self.host_context_reader.summary(host_context),
             },
         }
 
@@ -678,17 +884,122 @@ class EvolutionWorldAssistantService:
         if not novel_id or not chapter_number:
             return {"ok": True, "skipped": True, "reason": "missing novel_id/chapter_number"}
         issues = review_result.get("issues") or []
+        issue_items = [_normalize_evolution_issue_metadata(item) for item in issues if isinstance(item, dict)] if isinstance(issues, list) else []
+        solidified, agent_events = solidify_capsules_from_review(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            issues=issue_items,
+            existing_capsules=self.repository.list_agent_capsules(novel_id),
+            at=_now(),
+        )
+        for capsule in solidified:
+            self.repository.append_agent_capsule(novel_id, capsule)
+        for event in agent_events:
+            self.repository.append_agent_event(novel_id, event)
+        selection = _matching_agent_selection(
+            self.repository.list_agent_selection_records(novel_id, limit=30),
+            chapter_number,
+        )
+        evaluated_genes, evaluated_capsules, evaluation_event = evaluate_strategy_effectiveness(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            issues=issue_items,
+            selection=selection,
+            genes=self.repository.list_agent_genes(novel_id),
+            capsules=self.repository.list_agent_capsules(novel_id),
+            at=_now(),
+        )
+        if evaluation_event:
+            self.repository.save_agent_genes(novel_id, evaluated_genes)
+            for capsule in evaluated_capsules:
+                if str(capsule.get("id") or "") in set(selection.get("selected_capsule_ids") or []):
+                    self.repository.append_agent_capsule(novel_id, capsule)
+            self.repository.append_agent_event(novel_id, evaluation_event)
+        agent_api_record = None
+        reflection_record = None
+        agent_api_settings = self.get_settings(safe=False).get("agent_api")
+        if solidified and isinstance(agent_api_settings, dict) and agent_api_settings.get("enabled"):
+            agent_api_record = self._build_agent_reflection(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                capsules=solidified,
+                issues=issue_items,
+                settings=agent_api_settings,
+            )
+            reflection_record = agent_api_record.get("reflection") if isinstance(agent_api_record, dict) else None
+        elif solidified:
+            reflection_record = build_reflection_record(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                capsules=solidified,
+                issues=issue_items,
+                source="deterministic_fallback",
+                ok=True,
+                at=_now(),
+            )
+        if reflection_record:
+            self.repository.append_agent_reflection(novel_id, reflection_record)
+            self.repository.append_agent_event(
+                novel_id,
+                {
+                    "type": "EvolutionEvent",
+                    "schema_version": 1,
+                    "id": f"evt_reflection_saved_{_hash_text(novel_id + str(chapter_number) + str(reflection_record.get('id') or ''))}",
+                    "intent": "reflect",
+                    "hook_name": "after_chapter_review",
+                    "novel_id": novel_id,
+                    "chapter_number": chapter_number,
+                    "signals": ["review_reflection", "agent_memory"],
+                    "genes_used": [],
+                    "capsule_id": None,
+                    "outcome": {"status": "success", "reflection_id": reflection_record.get("id")},
+                    "meta": {"at": _now(), "source": reflection_record.get("source")},
+                },
+            )
+        candidate_records, memory_index, candidate_events = consolidate_agent_memory(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            genes=self.repository.list_agent_genes(novel_id),
+            capsules=self.repository.list_agent_capsules(novel_id),
+            reflections=self.repository.list_agent_reflections(novel_id),
+            existing_candidates=self.repository.list_agent_gene_candidates(novel_id),
+            at=_now(),
+        )
+        for candidate in candidate_records:
+            self.repository.append_agent_gene_candidate(novel_id, candidate)
+        for event in candidate_events:
+            self.repository.append_agent_event(novel_id, event)
+        self.repository.save_agent_memory_index(novel_id, memory_index)
         self.repository.append_review_record(
             novel_id,
             {
                 "chapter_number": chapter_number,
-                "issue_count": len(issues) if isinstance(issues, list) else 0,
+                "issue_count": len(issue_items),
+                "issues": issue_items[:12],
+                "issue_types": [str(item.get("issue_type") or "") for item in issue_items[:12]],
                 "overall_score": review_result.get("overall_score"),
                 "source": str(payload.get("source") or "chapter_review_service"),
+                "solidified_capsules": [capsule.get("id") for capsule in solidified],
+                "selection_id": selection.get("id") if selection else None,
+                "strategy_evaluation": evaluation_event.get("outcome") if evaluation_event else None,
+                "agent_api_reflection": agent_api_record,
+                "reflection_id": reflection_record.get("id") if reflection_record else None,
+                "gene_candidates": [candidate.get("id") for candidate in candidate_records],
                 "at": _now(),
             },
         )
-        return {"ok": True, "data": {"recorded": True, "chapter_number": chapter_number}}
+        return {
+            "ok": True,
+            "data": {
+                "recorded": True,
+                "chapter_number": chapter_number,
+                "solidified_capsules": solidified,
+                "agent_api_reflection": agent_api_record,
+                "reflection": reflection_record,
+                "gene_candidates": candidate_records,
+                "memory_index": memory_index,
+            },
+        }
 
     def build_context_patch(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> dict[str, Any]:
         facts = self.repository.list_fact_snapshots(
@@ -700,6 +1011,28 @@ class EvolutionWorldAssistantService:
         chapter_summaries = self.repository.list_chapter_summaries(novel_id, before_chapter=chapter_number, limit=10)
         volume_summaries = self.repository.list_volume_summaries(novel_id, before_chapter=chapter_number, limit=3)
         previous_injections = self.repository.list_context_injection_records(novel_id, limit=20)
+        route_map = self.get_global_route_map(novel_id)
+        host_context = self._read_host_context_safe(novel_id, chapter_number, outline=outline)
+        semantic_memory = self._read_semantic_memory_safe(novel_id, chapter_number, outline=outline)
+        self._save_context_dependency_summaries(novel_id, host_context, semantic_memory)
+        review_records = self.repository.list_review_records(novel_id, limit=10)
+        style_repetition_state = self.repository.get_style_repetition_state(novel_id)
+        agent_selection = select_agent_assets(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            signals=extract_context_signals(
+                outline=outline,
+                chapter_summaries=chapter_summaries,
+                route_map=route_map,
+                semantic_memory=semantic_memory,
+                review_records=review_records,
+                host_context=host_context,
+            ),
+            genes=self.repository.list_agent_genes(novel_id),
+            capsules=self.repository.list_agent_capsules(novel_id),
+            outline=outline,
+            at=_now(),
+        )
         return build_context_patch(
             novel_id,
             chapter_number,
@@ -709,10 +1042,209 @@ class EvolutionWorldAssistantService:
             chapter_summaries=chapter_summaries,
             volume_summaries=volume_summaries,
             previous_injections=previous_injections,
+            route_map=route_map,
+            semantic_memory=semantic_memory,
+            host_context=host_context,
+            agent_selection=agent_selection,
+            style_repetition_state=style_repetition_state,
         )
+
+    def _read_host_context_safe(self, novel_id: str, chapter_number: Optional[int], *, outline: str) -> dict[str, Any]:
+        def read() -> dict[str, Any]:
+            return self.host_context_reader.read(
+                novel_id,
+                query=outline,
+                before_chapter=chapter_number,
+                limit=6,
+            )
+
+        result = _call_with_timeout(read, timeout_seconds=CONTEXT_EXTERNAL_TIMEOUT_SECONDS)
+        if result.get("ok") and isinstance(result.get("value"), dict):
+            return result["value"]
+        reason = "host_context_timeout" if result.get("timeout") else "host_context_failed"
+        if result.get("error"):
+            logger.warning("Evolution host context degraded for %s: %s", novel_id, result["error"])
+        return _empty_host_context(novel_id, before_chapter=chapter_number, reason=reason)
+
+    def _read_semantic_memory_safe(self, novel_id: str, chapter_number: Optional[int], *, outline: str) -> dict[str, Any]:
+        def search() -> dict[str, Any]:
+            return self.semantic_memory.search(
+                novel_id,
+                outline,
+                before_chapter=chapter_number,
+                limit=8,
+            )
+
+        result = _call_with_timeout(search, timeout_seconds=CONTEXT_EXTERNAL_TIMEOUT_SECONDS)
+        if result.get("ok") and isinstance(result.get("value"), dict):
+            return result["value"]
+        reason = "semantic_recall_timeout" if result.get("timeout") else "semantic_recall_failed"
+        if result.get("error"):
+            logger.warning("Evolution semantic recall degraded for %s: %s", novel_id, result["error"])
+        return {
+            "items": [],
+            "source": reason,
+            "vector_enabled": False,
+            "collection_status": {"enabled": False, "degraded_reason": reason},
+        }
+
+    def _save_context_dependency_summaries(
+        self,
+        novel_id: str,
+        host_context: dict[str, Any],
+        semantic_memory: dict[str, Any],
+    ) -> None:
+        try:
+            self.repository.save_host_context_summary(novel_id, self.host_context_reader.summary(host_context))
+        except Exception as exc:
+            logger.warning("Evolution host context summary write failed for %s: %s", novel_id, exc)
+        try:
+            self.repository.save_semantic_recall_summary(
+                novel_id,
+                {
+                    "source": semantic_memory.get("source"),
+                    "vector_enabled": bool(semantic_memory.get("vector_enabled")),
+                    "item_count": len(semantic_memory.get("items") or []),
+                    "source_types": sorted({str(item.get("source_type") or "") for item in semantic_memory.get("items") or [] if isinstance(item, dict)}),
+                    "collection_status": semantic_memory.get("collection_status") or {},
+                },
+            )
+        except Exception as exc:
+            logger.warning("Evolution semantic recall summary write failed for %s: %s", novel_id, exc)
+
+    def _read_native_after_commit_context(self, *, novel_id: str, chapter_number: int, content: str) -> dict[str, Any]:
+        try:
+            host_context = self.host_context_reader.read(
+                novel_id,
+                query=content[:1200],
+                before_chapter=chapter_number + 1,
+                limit=6,
+            )
+            summary = self.host_context_reader.summary(host_context)
+            self.repository.save_host_context_summary(novel_id, summary)
+        except Exception as exc:
+            logger.warning("Evolution native after-commit context read failed for %s ch%s: %s", novel_id, chapter_number, exc)
+            summary = _empty_host_context(novel_id, before_chapter=chapter_number + 1, reason="native_after_commit_failed")
+        counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+        native_counts = {
+            key: int(counts.get(key) or 0)
+            for key in ("story_knowledge", "triples", "foreshadow", "storyline", "timeline", "dialogue", "memory_engine")
+        }
+        has_native_sync = any(native_counts.values())
+        return {
+            "source": "plotpilot_native_after_commit",
+            "chapter_number": chapter_number,
+            "has_native_sync": has_native_sync,
+            "fallback_degraded": not has_native_sync,
+            "native_counts": native_counts,
+            "degraded_sources": list(summary.get("degraded_sources") or []),
+            "empty_sources": list(summary.get("empty_sources") or []),
+            "suggestion": "" if has_native_sync else "PlotPilot 原生章后同步尚未命中；本章 Evolution 抽取仅作为 degraded fallback，不覆盖宿主主库。",
+        }
 
     def build_context_summary(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> str:
         return render_patch_summary(self.build_context_patch(novel_id, chapter_number, outline=outline))
+
+    def _build_agent_reflection(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        capsules: list[dict[str, Any]],
+        issues: list[dict[str, Any]],
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        started_at = _now()
+        try:
+            llm_service = self._resolve_agent_llm_service(settings)
+            prompt = _build_agent_reflection_prompt(chapter_number=chapter_number, capsules=capsules, issues=issues)
+            result = _run_async_blocking(
+                llm_service.generate(
+                    prompt,
+                    _make_generation_config(
+                        model=str(settings.get("model") or ""),
+                        max_tokens=_clamp_int(settings.get("max_tokens"), 128, 2048, 800),
+                        temperature=_clamp_float(settings.get("temperature"), 0.0, 2.0, 0.1),
+                    ),
+                )
+            )
+            content = str(result.content or "").strip()[:1200]
+            finished_at = _now()
+            structured = _parse_agent_reflection_json(content)
+            reflection = build_reflection_record(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                capsules=capsules,
+                issues=issues,
+                content=content,
+                structured=structured,
+                source="agent_api",
+                model=str(settings.get("model") or ""),
+                token_usage=_token_usage_to_dict(getattr(result, "token_usage", None)),
+                ok=True,
+                at=finished_at,
+            )
+            record = {
+                "ok": True,
+                "started_at": started_at,
+                "at": finished_at,
+                "chapter_number": chapter_number,
+                "provider_mode": settings.get("provider_mode"),
+                "model": str(settings.get("model") or ""),
+                "capsule_ids": [str(item.get("id") or "") for item in capsules],
+                "content": content,
+                "structured": structured,
+                "reflection": reflection,
+                "token_usage": _token_usage_to_dict(getattr(result, "token_usage", None)),
+            }
+            self.repository.append_agent_event(
+                novel_id,
+                {
+                    "type": "EvolutionEvent",
+                    "schema_version": 1,
+                    "id": f"evt_agent_api_{_hash_text(novel_id + str(chapter_number) + finished_at)}",
+                    "intent": "reflect",
+                    "hook_name": "after_chapter_review",
+                    "novel_id": novel_id,
+                    "chapter_number": chapter_number,
+                    "signals": ["agent_api", "review_reflection"],
+                    "genes_used": [],
+                    "capsule_id": None,
+                    "outcome": {"status": "success", "capsule_count": len(capsules)},
+                    "meta": {"at": finished_at, "model": str(settings.get("model") or "")},
+                },
+            )
+            return record
+        except Exception as exc:
+            failed_at = _now()
+            reflection = build_reflection_record(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                capsules=capsules,
+                issues=issues,
+                source="agent_api_fallback",
+                ok=False,
+                error=str(exc),
+                at=failed_at,
+            )
+            self.repository.append_agent_event(
+                novel_id,
+                {
+                    "type": "EvolutionEvent",
+                    "schema_version": 1,
+                    "id": f"evt_agent_api_failed_{_hash_text(novel_id + str(chapter_number) + failed_at)}",
+                    "intent": "reflect",
+                    "hook_name": "after_chapter_review",
+                    "novel_id": novel_id,
+                    "chapter_number": chapter_number,
+                    "signals": ["agent_api", "review_reflection"],
+                    "genes_used": [],
+                    "capsule_id": None,
+                    "outcome": {"status": "failed", "error": str(exc)},
+                    "meta": {"at": failed_at},
+                },
+            )
+            return {"ok": False, "started_at": started_at, "at": failed_at, "error": str(exc), "reflection": reflection}
 
 
 def _build_prehistory_worldline(
@@ -1233,6 +1765,35 @@ def _review_character_card_against_content(card: dict[str, Any], content: str, c
                 "将确定判断改为观察、推断、误判或带代价的验证，让角色认知随证据成长。",
             )
         )
+    palette = card.get("personality_palette") if isinstance(card.get("personality_palette"), dict) else {}
+    missing_palette_fields = _missing_palette_fields(palette)
+    if missing_palette_fields:
+        issue = _review_issue(
+            "evolution_palette_missing",
+            "warning",
+            f"{name} 本章出场，但人物卡性格调色盘仍缺少：{', '.join(missing_palette_fields)}。",
+            chapter_number,
+            "不要只写性格标签；请从本章动作、选择和关系反应中推断底色、主色调与点缀。",
+        )
+        issue["evidence"] = [{"character": name, "missing_fields": missing_palette_fields}]
+        issues.append(issue)
+    elif _looks_like_palette_drift(content) and not _has_transition_marker(content):
+        issue = _review_issue(
+            "evolution_palette_drift",
+            "warning",
+            f"{name} 本章出现明显性格反转/漂移表述，但缺少情境压力、关系触发或成长过渡。",
+            chapter_number,
+            "如要违背既有调色盘，请写出触发条件；否则让行为回到既有底色、主色调和点缀的衍生范围。",
+        )
+        issue["evidence"] = [
+            {
+                "character": name,
+                "base": palette.get("base"),
+                "main_tones": _as_strings(palette.get("main_tones"))[:4],
+                "sample": str(content or "")[:240],
+            }
+        ]
+        issues.append(issue)
     return issues
 
 
@@ -1244,6 +1805,480 @@ def _review_issue(issue_type: str, severity: str, description: str, chapter_numb
         "location": f"Chapter {chapter_number}",
         "suggestion": suggestion,
     }
+
+
+def _normalize_evolution_issue_metadata(issue: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(issue)
+    issue_type = str(normalized.get("issue_type") or "")
+    if issue_type.startswith("evolution_"):
+        normalized.setdefault("source_plugin", PLUGIN_NAME)
+    normalized.setdefault("issue_family", _issue_family(issue_type))
+    normalized.setdefault("suggestion", "")
+    evidence = normalized.get("evidence")
+    if evidence is None:
+        normalized["evidence"] = []
+    elif isinstance(evidence, dict):
+        normalized["evidence"] = [evidence]
+    elif not isinstance(evidence, list):
+        normalized["evidence"] = [{"value": str(evidence)}]
+    if "host_source_refs" not in normalized:
+        refs = []
+        for item in normalized.get("evidence") or []:
+            if isinstance(item, dict) and (item.get("source") or item.get("source_type") or item.get("id")):
+                refs.append(
+                    {
+                        "source": item.get("source") or item.get("source_type") or "",
+                        "id": item.get("id"),
+                        "source_type": item.get("source_type"),
+                    }
+                )
+        normalized["host_source_refs"] = refs
+    return normalized
+
+
+def _issue_family(issue_type: str) -> str:
+    text = str(issue_type or "")
+    for marker, family in (
+        ("route", "route"),
+        ("boundary", "boundary_state"),
+        ("palette", "personality_palette"),
+        ("pollution", "entity_pollution"),
+        ("style_repetition", "style_repetition"),
+        ("bible", "bible"),
+        ("story_knowledge", "story_knowledge"),
+        ("storyline", "storyline"),
+        ("foreshadow", "foreshadow"),
+        ("timeline", "timeline"),
+        ("chronicle", "chronicle"),
+        ("dialogue", "dialogue"),
+        ("triple", "triples"),
+        ("memory_engine", "memory_engine"),
+        ("knowledge", "knowledge"),
+        ("worldbuilding", "worldbuilding"),
+    ):
+        if marker in text:
+            return family
+    return text.replace("evolution_", "") or "general"
+
+
+def _review_host_context_against_content(host_context: dict[str, Any], content: str, chapter_number: int) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    text = str(content or "")
+    for source, issue_type, label in (
+        ("bible", "evolution_bible_context", "Bible 人物/地点边界"),
+        ("world", "evolution_worldbuilding_context", "世界观/地点设定"),
+        ("knowledge", "evolution_knowledge_context", "知识库事实"),
+        ("story_knowledge", "evolution_story_knowledge_context", "章后叙事同步"),
+        ("storyline", "evolution_storyline_context", "故事线"),
+        ("timeline", "evolution_timeline_context", "时间线"),
+        ("chronicle", "evolution_chronicle_context", "编年史"),
+        ("foreshadow", "evolution_foreshadow_context", "伏笔账本"),
+        ("dialogue", "evolution_dialogue_voice_context", "对话声线样本"),
+        ("triples", "evolution_triples_context", "图谱三元组"),
+        ("memory_engine", "evolution_memory_engine_context", "MemoryEngine fact lock"),
+    ):
+        matches = _host_context_mentions(host_context.get(source) or [], text)
+        if not matches:
+            continue
+        issue = _review_issue(
+            issue_type,
+            "warning",
+            f"本章触及 PlotPilot {label} 中的既有信息：{', '.join(str(item.get('name') or item.get('id') or '') for item in matches[:3])}。",
+            chapter_number,
+            f"写作与审查时应显式核对 {label}；如要偏离，需要在正文中给出转场、解释、误导或回收依据。",
+        )
+        evidence = [
+            {
+                "source": source,
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "description": item.get("description"),
+                "source_type": item.get("source_type"),
+            }
+            for item in matches[:4]
+        ]
+        issue["source_plugin"] = "world_evolution_core"
+        issue["issue_family"] = source
+        issue["host_source_refs"] = [{"source": item["source"], "id": item.get("id"), "source_type": item.get("source_type")} for item in evidence]
+        issue["evidence"] = evidence
+        issues.append(issue)
+    return issues[:6]
+
+
+def _host_context_mentions(items: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
+    matches = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        terms = [str(item.get("name") or "").strip(), str(item.get("kind") or "").strip()]
+        terms.extend(_extract_short_terms(item.get("description")))
+        if any(term and len(term) >= 2 and term in text for term in terms[:8]):
+            matches.append(item)
+    return matches
+
+
+def _extract_short_terms(value: Any) -> list[str]:
+    terms = []
+    current = []
+    for char in str(value or ""):
+        if "\u4e00" <= char <= "\u9fff" or char.isalnum():
+            current.append(char)
+            continue
+        if 2 <= len(current) <= 12:
+            terms.append("".join(current))
+        current = []
+    if 2 <= len(current) <= 12:
+        terms.append("".join(current))
+    return terms[:6]
+
+
+def _matching_agent_selection(records: list[dict[str, Any]], chapter_number: int) -> dict[str, Any]:
+    for record in reversed(records or []):
+        if _int_or_none(record.get("chapter_number")) == chapter_number:
+            return record
+    return {}
+
+
+_REPETITION_PHRASES = [
+    "没有说话",
+    "没有回答",
+    "喉咙发紧",
+    "深吸一口气",
+    "沉默几秒",
+    "沉默了几秒",
+    "声音很轻",
+    "掌心发烫",
+    "像是等",
+]
+
+
+_NON_CHARACTER_ENTITY_NAMES = {
+    "金属牌",
+    "方向",
+    "查询记录",
+    "记录",
+    "编号",
+    "债务",
+    "契约",
+    "防火门",
+    "黑色书籍",
+    "书籍",
+    "访客卡",
+    "臂章",
+    "钥匙",
+    "黑匣子",
+    "章节标题",
+    "标题",
+    "线索",
+    "真相",
+    "秘密",
+    "记忆",
+    "沉默",
+}
+_NON_CHARACTER_ENTITY_TOKENS = (
+    "金属",
+    "查询",
+    "记录",
+    "方向",
+    "编号",
+    "钥匙",
+    "防火门",
+    "书籍",
+    "教程",
+    "章节",
+    "标题",
+    "线索",
+    "真相",
+    "秘密",
+    "记忆",
+    "警报",
+)
+_NON_CHARACTER_ENTITY_SUFFIXES = ("之谜", "真相", "记录", "线索", "计划", "任务", "报告")
+_BAD_LOCATION_NAMES = {"专门", "道防火门", "个信息站", "老板专门", "但他咬牙站"}
+_BAD_LOCATION_PARTS = ("咬牙", "老板", "专门", "那道", "这道")
+
+
+def _filter_snapshot_characters(names: list[Any]) -> list[str]:
+    return _dedupe_runtime(str(name).strip() for name in names if _valid_snapshot_character_name(str(name or "")))
+
+
+def _filter_snapshot_locations(names: list[Any]) -> list[str]:
+    return _dedupe_runtime(str(name).strip() for name in names if _valid_snapshot_location_name(str(name or "")))
+
+
+def _valid_snapshot_character_name(name: str) -> bool:
+    value = str(name or "").strip()
+    if not value or value in _NON_CHARACTER_ENTITY_NAMES:
+        return False
+    if any(token in value for token in _NON_CHARACTER_ENTITY_TOKENS):
+        return False
+    if any(value.endswith(suffix) for suffix in _NON_CHARACTER_ENTITY_SUFFIXES):
+        return False
+    if value.startswith("第") and ("章" in value or "幕" in value):
+        return False
+    if 6 < len(value) and not any(token in value for token in ("·", "氏", "家", "队", "团")):
+        return False
+    return True
+
+
+def _valid_snapshot_location_name(name: str) -> bool:
+    value = str(name or "").strip()
+    if len(value) < 2 or value in _BAD_LOCATION_NAMES:
+        return False
+    if any(token in value for token in _BAD_LOCATION_PARTS):
+        return False
+    return True
+
+
+def _dedupe_runtime(items: Any) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        value = str(item or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _build_style_repetition_state(
+    *,
+    novel_id: str,
+    chapter_number: int,
+    content: str,
+    recent_summaries: list[dict[str, Any]],
+    at: str,
+) -> dict[str, Any]:
+    text = "\n".join([*(str(item.get("short_summary") or "") for item in recent_summaries[-3:]), str(content or "")])
+    phrases = []
+    for phrase in _REPETITION_PHRASES:
+        count = text.count(phrase)
+        if count >= 3:
+            phrases.append(
+                {
+                    "phrase": phrase,
+                    "count": count,
+                    "chapters": [chapter_number],
+                    "replacement_guidance": _replacement_guidance_for_phrase(phrase),
+                }
+            )
+    return {
+        "schema_version": 1,
+        "novel_id": novel_id,
+        "chapter_number": chapter_number,
+        "window": "recent_3_chapters_plus_current",
+        "phrases": sorted(phrases, key=lambda item: (-int(item.get("count") or 0), str(item.get("phrase") or "")))[:10],
+        "at": at,
+    }
+
+
+def _review_style_repetition(content: str, chapter_number: int) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for phrase in _REPETITION_PHRASES:
+        count = str(content or "").count(phrase)
+        if count < 4:
+            continue
+        issue = _review_issue(
+            "evolution_style_repetition",
+            "warning",
+            f"本章高频重复反应模板「{phrase}」出现 {count} 次，容易形成机械化表达。",
+            chapter_number,
+            _replacement_guidance_for_phrase(phrase),
+        )
+        issue["evidence"] = [{"phrase": phrase, "count": count, "sample": _sample_phrase_context(content, phrase)}]
+        issues.append(issue)
+    return issues
+
+
+def _review_extraction_pollution(cards: list[dict[str, Any]], facts: list[dict[str, Any]], chapter_number: int) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    invalid_cards = [card for card in cards if str(card.get("status") or "") == "invalid_entity"]
+    if invalid_cards:
+        names = [str(card.get("name") or "") for card in invalid_cards[:6]]
+        issue = _review_issue(
+            "evolution_character_pollution",
+            "warning",
+            f"人物卡检测到非人物实体污染：{', '.join(names)}。",
+            chapter_number,
+            "将物品、方向、查询记录、抽象概念放入 world facts 或 props，不要注入人物卡主上下文。",
+        )
+        issue["evidence"] = [
+            {
+                "names": names,
+                "count": len(invalid_cards),
+                "entities": [
+                    {
+                        "name": str(card.get("name") or ""),
+                        "first_seen_chapter": card.get("first_seen_chapter"),
+                        "last_seen_chapter": card.get("last_seen_chapter"),
+                        "invalid_reason": card.get("invalid_reason"),
+                    }
+                    for card in invalid_cards[:6]
+                ],
+            }
+        ]
+        issues.append(issue)
+    bad_locations: list[str] = []
+    for fact in facts:
+        for location in fact.get("locations") or []:
+            value = str(location or "").strip()
+            if value in {"但他咬牙站", "个信息站", "老板专门", "道防火门"} or any(token in value for token in ("咬牙", "老板", "专门")):
+                bad_locations.append(value)
+    if bad_locations:
+        issue = _review_issue(
+            "evolution_location_pollution",
+            "warning",
+            f"地点列表检测到疑似半句残片：{', '.join(bad_locations[:6])}。",
+            chapter_number,
+            "地点必须是空间名词、地图节点或上下文位置表达；动词残片和半句不要进入路线图。",
+        )
+        issue["evidence"] = [{"locations": bad_locations[:8], "count": len(bad_locations)}]
+        issues.append(issue)
+    return issues
+
+
+def _review_boundary_state(previous_summaries: list[dict[str, Any]], content: str, chapter_number: int) -> list[dict[str, Any]]:
+    if not previous_summaries:
+        return []
+    previous = previous_summaries[-1]
+    carry = previous.get("carry_forward") if isinstance(previous.get("carry_forward"), dict) else {}
+    previous_locations = [str(item) for item in carry.get("last_known_locations") or [] if str(item).strip()]
+    if not previous_locations:
+        return []
+    opening = str(content or "")[:520]
+    if any(location and location in opening for location in previous_locations):
+        if any(token in opening for token in ("才找到", "第一次找到", "重新进入", "又一次进入", "再次抵达", "终于找到")):
+            return [
+                _boundary_issue(
+                    chapter_number,
+                    "上一章结尾已将角色停在同一地点，本章开头又写成重新/首次抵达，疑似章节首尾回滚。",
+                    previous,
+                    opening,
+                )
+            ]
+        return []
+    if any(token in opening for token in ("回到", "来到", "抵达", "进入", "走进")) and not any(
+        token in opening for token in ("后来", "数小时后", "第二天", "转场", "离开", "赶往", "沿着", "穿过", "绕过")
+    ):
+        return [
+            _boundary_issue(
+                chapter_number,
+                f"上一章终点在 {', '.join(previous_locations[:3])}，本章开头切换地点但缺少明确移动/跳时桥段。",
+                previous,
+                opening,
+            )
+        ]
+    return []
+
+
+def _boundary_issue(chapter_number: int, description: str, previous: dict[str, Any], opening: str) -> dict[str, Any]:
+    issue = _review_issue(
+        "evolution_boundary_state",
+        "warning",
+        description,
+        chapter_number,
+        "下一章开头必须承接上一章终点；若跳时空，先补一句转场、移动路径或视角桥接。",
+    )
+    ending = previous.get("ending_state") if isinstance(previous.get("ending_state"), dict) else {}
+    issue["evidence"] = [
+        {
+            "previous_chapter": previous.get("chapter_number"),
+            "previous_ending": str(ending.get("excerpt") or "")[:220],
+            "current_opening": str(opening or "")[:220],
+        }
+    ]
+    return issue
+
+
+def _replacement_guidance_for_phrase(phrase: str) -> str:
+    if phrase in {"没有说话", "没有回答", "沉默几秒", "沉默了几秒"}:
+        return "用手部动作、视线落点、站位变化或物件处理替代沉默模板，并让沉默推动关系或信息差。"
+    if phrase in {"喉咙发紧", "深吸一口气", "声音很轻"}:
+        return "改用更具体的身体反应、环境压迫或句式节奏，不要重复同一生理模板。"
+    return "替换为场景化动作和可观察细节，让反应承担新的剧情信息。"
+
+
+def _sample_phrase_context(content: str, phrase: str) -> str:
+    text = str(content or "")
+    index = text.find(phrase)
+    if index < 0:
+        return ""
+    return text[max(0, index - 50) : index + len(phrase) + 50]
+
+
+def _review_route_conflicts(conflicts: list[dict[str, Any]], chapter_number: int) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for conflict in conflicts:
+        if not isinstance(conflict, dict):
+            continue
+        current_chapter = _int_or_none(conflict.get("chapter_current"))
+        if current_chapter != chapter_number:
+            continue
+        conflict_type = str(conflict.get("type") or "route_conflict").strip() or "route_conflict"
+        message = str(conflict.get("message") or "").strip()
+        if not message:
+            continue
+        key = f"{conflict_type}:{message}"
+        if key in seen:
+            continue
+        seen.add(key)
+        severity = "critical" if str(conflict.get("severity") or "") == "hard" else "warning"
+        suggestion = _route_conflict_suggestion(conflict_type)
+        issue_type = "evolution_route_missing_transition" if conflict_type == "location_jump_without_bridge" else f"evolution_route_{conflict_type}"
+        issue = _review_issue(
+            issue_type,
+            severity,
+            message,
+            chapter_number,
+            suggestion,
+        )
+        issue["evidence"] = [
+            {
+                "type": conflict_type,
+                "severity": conflict.get("severity"),
+                "character": conflict.get("character"),
+                "chapter_previous": conflict.get("chapter_previous"),
+                "chapter_current": conflict.get("chapter_current"),
+                "previous_location": conflict.get("previous_location"),
+                "current_location": conflict.get("current_location"),
+                "evidence": conflict.get("evidence"),
+            }
+        ]
+        issues.append(issue)
+    return issues
+
+
+def _route_conflict_suggestion(conflict_type: str) -> str:
+    if conflict_type == "repeated_arrival":
+        return "如果角色上一章结尾已经在该地点，本章开头应承接在场状态；若要重新进入，请补足离开、转场和再次抵达的因果。"
+    if conflict_type == "location_jump_without_bridge":
+        return "补写移动桥段、跳时提示或视角切换，让读者知道角色如何从上一地点到达当前地点。"
+    if conflict_type == "missing_transition":
+        return "补写移动桥段、跳时提示或视角切换，让读者知道角色如何从上一地点到达当前地点。"
+    if conflict_type == "boundary_rollback":
+        return "承接上一章终点；如果回到旧地点，必须先交代离开与再次抵达。"
+    if conflict_type == "multi_location_same_chapter":
+        return "明确同章内的移动顺序和时间间隔，避免同一角色像同时存在于多个地点。"
+    return "核对人物上一章终点、本章起点和场景移动链，补足必要过渡。"
+
+
+def _missing_palette_fields(palette: Any) -> list[str]:
+    if not isinstance(palette, dict):
+        return ["base", "main_tones", "derivatives"]
+    missing = []
+    if not str(palette.get("base") or "").strip():
+        missing.append("base")
+    if not palette.get("main_tones"):
+        missing.append("main_tones")
+    if not palette.get("derivatives"):
+        missing.append("derivatives")
+    return missing
+
+
+def _looks_like_palette_drift(content: str) -> bool:
+    text = str(content or "")
+    return any(token in text for token in ("突然变得", "一反常态", "完全不像自己", "像换了个人", "毫无理由地"))
 
 
 def _build_timeline_events(snapshot, extraction: dict[str, Any], content_hash: str, at: str) -> list[dict[str, Any]]:
@@ -1509,7 +2544,7 @@ def _default_settings() -> dict[str, Any]:
             "max_tokens": 1400,
             "custom_profile": {
                 "id": "evolution-api2-custom",
-                "name": "Evolution API2",
+                "name": "Evolution Legacy API2",
                 "preset_key": "custom-openai-compatible",
                 "protocol": "openai",
                 "base_url": "",
@@ -1521,7 +2556,31 @@ def _default_settings() -> dict[str, Any]:
                 "extra_headers": {},
                 "extra_query": {},
                 "extra_body": {},
-                "notes": "Evolution 控制卡压缩专用 API",
+                "notes": "Deprecated legacy API2 settings; Evolution now uses agent_api.",
+                "use_legacy_chat_completions": False,
+            },
+        },
+        "agent_api": {
+            "enabled": False,
+            "provider_mode": "same_as_main",
+            "model": "",
+            "temperature": 0.1,
+            "max_tokens": 800,
+            "custom_profile": {
+                "id": "evolution-agent-custom",
+                "name": "Evolution Agent API",
+                "preset_key": "custom-openai-compatible",
+                "protocol": "openai",
+                "base_url": "",
+                "api_key": "",
+                "model": "",
+                "temperature": 0.1,
+                "max_tokens": 800,
+                "timeout_seconds": 180,
+                "extra_headers": {},
+                "extra_query": {},
+                "extra_body": {},
+                "notes": "Evolution 智能体反思与策略固化专用 API",
                 "use_legacy_chat_completions": False,
             },
         },
@@ -1537,7 +2596,7 @@ def _normalize_settings(raw: dict[str, Any], *, existing: Optional[dict[str, Any
     api2 = base["api2_control_card"]
     api2["enabled"] = bool(api2.get("enabled"))
     provider_mode = str(api2.get("provider_mode") or "same_as_main")
-    api2["provider_mode"] = provider_mode if provider_mode in API2_PROVIDER_MODES else "same_as_main"
+    api2["provider_mode"] = provider_mode if provider_mode in LLM_PROVIDER_MODES else "same_as_main"
     api2["temperature"] = _clamp_float(api2.get("temperature"), 0.0, 2.0, 0.2)
     api2["max_tokens"] = _clamp_int(api2.get("max_tokens"), 256, 4096, 1400)
     custom = _custom_profile_for_storage(api2.get("custom_profile") if isinstance(api2.get("custom_profile"), dict) else {})
@@ -1551,30 +2610,97 @@ def _normalize_settings(raw: dict[str, Any], *, existing: Optional[dict[str, Any
         api2["model"] = custom.get("model") or ""
         api2["temperature"] = custom.get("temperature", api2["temperature"])
         api2["max_tokens"] = custom.get("max_tokens", api2["max_tokens"])
+    agent = base["agent_api"]
+    agent["enabled"] = bool(agent.get("enabled"))
+    agent_mode = str(agent.get("provider_mode") or "same_as_main")
+    agent["provider_mode"] = agent_mode if agent_mode in LLM_PROVIDER_MODES else "same_as_main"
+    agent["temperature"] = _clamp_float(agent.get("temperature"), 0.0, 2.0, 0.1)
+    agent["max_tokens"] = _clamp_int(agent.get("max_tokens"), 128, 2048, 800)
+    agent_custom = _custom_profile_for_storage(
+        agent.get("custom_profile") if isinstance(agent.get("custom_profile"), dict) else {},
+        profile_id="evolution-agent-custom",
+        profile_name="Evolution Agent API",
+        notes="Evolution 智能体反思与策略固化专用 API",
+        default_temperature=0.1,
+        default_max_tokens=800,
+    )
+    if existing:
+        prior = ((existing.get("agent_api") or {}).get("custom_profile") or {}) if isinstance(existing, dict) else {}
+        submitted_key = str(agent_custom.get("api_key") or "")
+        if submitted_key in {"", "********", "••••••••"}:
+            agent_custom["api_key"] = str(prior.get("api_key") or "")
+    agent["custom_profile"] = agent_custom
+    if agent["provider_mode"] == "custom":
+        agent["model"] = agent_custom.get("model") or ""
+        agent["temperature"] = agent_custom.get("temperature", agent["temperature"])
+        agent["max_tokens"] = agent_custom.get("max_tokens", agent["max_tokens"])
     return base
 
 
 def _redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
     safe = copy.deepcopy(settings)
-    custom = ((safe.get("api2_control_card") or {}).get("custom_profile") or {})
-    api_key = str(custom.get("api_key") or "")
-    custom["api_key"] = ""
-    custom["api_key_configured"] = bool(api_key)
+    for key in ("api2_control_card", "agent_api"):
+        custom = ((safe.get(key) or {}).get("custom_profile") or {})
+        api_key = str(custom.get("api_key") or "")
+        custom["api_key"] = ""
+        custom["api_key_configured"] = bool(api_key)
     return safe
 
 
-def _build_api2_models_request(payload: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-    api2 = settings.get("api2_control_card") if isinstance(settings.get("api2_control_card"), dict) else {}
-    saved_custom = api2.get("custom_profile") if isinstance(api2.get("custom_profile"), dict) else {}
-    submitted_api2 = payload.get("api2_control_card") if isinstance(payload.get("api2_control_card"), dict) else payload
-    submitted_custom = submitted_api2.get("custom_profile") if isinstance(submitted_api2.get("custom_profile"), dict) else {}
-    provider_mode = str(submitted_api2.get("provider_mode") or api2.get("provider_mode") or "same_as_main")
-    if provider_mode not in API2_PROVIDER_MODES:
+def _call_with_timeout(fn: Any, *, timeout_seconds: float) -> dict[str, Any]:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="evolution-context")
+    future = executor.submit(fn)
+    try:
+        return {"ok": True, "value": future.result(timeout=timeout_seconds)}
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        return {"ok": False, "timeout": True}
+    except Exception as exc:
+        executor.shutdown(wait=False, cancel_futures=True)
+        return {"ok": False, "error": str(exc)[:240]}
+    finally:
+        if future.done():
+            executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _empty_host_context(novel_id: str, *, before_chapter: Optional[int], reason: str) -> dict[str, Any]:
+    counts = {key: 0 for key in HOST_CONTEXT_SOURCES}
+    return {
+        "schema_version": 1,
+        "novel_id": novel_id,
+        "source": "plotpilot_host_readonly",
+        "before_chapter": before_chapter,
+        "active_sources": [],
+        "degraded_sources": [reason],
+        "counts": counts,
+        "plotpilot_context_usage": {
+            "source": "plotpilot_native_context_adapter",
+            "mode": "strategy_only",
+            "hit_counts_by_tier": {},
+            "degraded_sources": [reason],
+            "long_context_duplicated": False,
+        },
+        **{key: [] for key in HOST_CONTEXT_SOURCES},
+    }
+
+
+def _build_agent_models_request(payload: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    return _build_llm_models_request(payload, settings, key="agent_api")
+
+
+def _build_llm_models_request(payload: dict[str, Any], settings: dict[str, Any], *, key: str) -> dict[str, Any]:
+    channel = settings.get(key) if isinstance(settings.get(key), dict) else {}
+    saved_custom = channel.get("custom_profile") if isinstance(channel.get("custom_profile"), dict) else {}
+    submitted_channel = payload.get(key) if isinstance(payload.get(key), dict) else payload
+    submitted_custom = submitted_channel.get("custom_profile") if isinstance(submitted_channel.get("custom_profile"), dict) else {}
+    provider_mode = str(submitted_channel.get("provider_mode") or channel.get("provider_mode") or "same_as_main")
+    if provider_mode not in LLM_PROVIDER_MODES:
         provider_mode = "same_as_main"
 
     if provider_mode == "custom":
         protocol = str(submitted_custom.get("protocol") or saved_custom.get("protocol") or "openai").strip()
-        if protocol not in API2_PROTOCOLS:
+        if protocol not in LLM_MODEL_PROTOCOLS:
             protocol = "openai"
         api_key = str(submitted_custom.get("api_key") or "").strip()
         if api_key in {"", "********", "••••••••"}:
@@ -1587,9 +2713,9 @@ def _build_api2_models_request(payload: dict[str, Any], settings: dict[str, Any]
             "timeout_ms": _clamp_int(payload.get("timeout_ms"), 1000, 120000, 30000),
         }
 
-    active_protocol = str(submitted_api2.get("protocol") or "openai").strip() or "openai"
-    active_base_url = str(submitted_api2.get("base_url") or "").strip()
-    active_api_key = str(submitted_api2.get("api_key") or "").strip()
+    active_protocol = str(submitted_channel.get("protocol") or "openai").strip() or "openai"
+    active_base_url = str(submitted_channel.get("base_url") or "").strip()
+    active_api_key = str(submitted_channel.get("api_key") or "").strip()
     if not active_api_key:
         try:
             from application.ai.llm_control_service import LLMControlService
@@ -1604,19 +2730,19 @@ def _build_api2_models_request(payload: dict[str, Any], settings: dict[str, Any]
 
     return {
         "source": "same_as_main",
-        "protocol": active_protocol if active_protocol in API2_PROTOCOLS else "openai",
+        "protocol": active_protocol if active_protocol in LLM_MODEL_PROTOCOLS else "openai",
         "base_url": active_base_url,
         "api_key": active_api_key,
         "timeout_ms": _clamp_int(payload.get("timeout_ms"), 1000, 120000, 30000),
     }
 
 
-def _api2_runtime_settings_from_payload(payload: dict[str, Any], saved_settings: dict[str, Any]) -> dict[str, Any]:
-    raw_api2 = payload.get("api2_control_card") if isinstance(payload.get("api2_control_card"), dict) else payload
-    return _normalize_settings({"api2_control_card": raw_api2}, existing=saved_settings)["api2_control_card"]
+def _agent_runtime_settings_from_payload(payload: dict[str, Any], saved_settings: dict[str, Any]) -> dict[str, Any]:
+    raw_agent = payload.get("agent_api") if isinstance(payload.get("agent_api"), dict) else payload
+    return _normalize_settings({"agent_api": raw_agent}, existing=saved_settings)["agent_api"]
 
 
-async def _fetch_api2_model_items(request: dict[str, Any]) -> list[dict[str, str]]:
+async def _fetch_model_list_items(request: dict[str, Any]) -> list[dict[str, str]]:
     import httpx
 
     api_key = str(request.get("api_key") or "").strip()
@@ -1653,10 +2779,10 @@ async def _fetch_api2_model_items(request: dict[str, Any]) -> list[dict[str, str
     except ValueError as exc:
         raise RuntimeError(f"上游未返回 JSON（请求 {url}）") from exc
 
-    return _normalize_api2_model_items(data, protocol)
+    return _normalize_model_list_items(data, protocol)
 
 
-def _normalize_api2_model_items(data: dict[str, Any], protocol: str) -> list[dict[str, str]]:
+def _normalize_model_list_items(data: dict[str, Any], protocol: str) -> list[dict[str, str]]:
     if protocol == "gemini":
         raw_items = data.get("models", [])
     else:
@@ -1708,7 +2834,7 @@ def _gemini_models_base(base_url: str) -> str:
     return raw
 
 
-def _build_api2_test_prompt() -> Any:
+def _build_llm_connection_test_prompt() -> Any:
     try:
         from domain.ai.value_objects.prompt import Prompt
 
@@ -1722,6 +2848,75 @@ def _build_api2_test_prompt() -> Any:
         return PromptFallback()
 
 
+def _build_agent_reflection_prompt(*, chapter_number: int, capsules: list[dict[str, Any]], issues: list[dict[str, Any]]) -> Any:
+    system = (
+        "你是 Evolution 智能体的反思器，不写小说正文。"
+        "你只总结本轮审查暴露出的可复用经验，帮助后续章节减少连续性和人物逻辑错误。"
+        "必须输出 JSON 对象，不要输出 Markdown。"
+    )
+    capsule_lines = "\n".join(
+        f"- {item.get('title') or item.get('id')}：{item.get('guidance') or item.get('summary')}"
+        for item in capsules[:6]
+    )
+    issue_lines = "\n".join(
+        f"- [{item.get('severity')}] {item.get('issue_type')}：{item.get('description')}｜建议：{item.get('suggestion')}"
+        for item in issues[:8]
+    )
+    user = f"""【章节】
+第{chapter_number}章
+
+【本轮固化 Capsule】
+{capsule_lines or '无'}
+
+【审查问题】
+{issue_lines or '无'}
+
+请输出 JSON：
+{{
+  "problem_pattern": "本轮问题模式，80字内",
+  "root_cause": "根因，160字内",
+  "next_chapter_constraints": ["后续可执行约束1", "后续可执行约束2"],
+  "evidence_refs": [{{"summary": "引用证据摘要"}}],
+  "suggest_gene_candidate": false
+}}
+
+要求：
+1. 只写后续可执行的写作/审查策略。
+2. 不复述完整剧情。
+3. 不新增事实设定。
+4. 优先处理章节承接、人物路线、认知边界、能力边界、性格调色盘。"""
+    try:
+        from domain.ai.value_objects.prompt import Prompt
+
+        return Prompt(system=system, user=user)
+    except Exception:
+        class PromptFallback:
+            def __init__(self) -> None:
+                self.system = system
+                self.user = user
+
+        return PromptFallback()
+
+
+def _parse_agent_reflection_json(content: str) -> dict[str, Any]:
+    text = str(content or "").strip()
+    if not text:
+        return {}
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        text = text[start : end + 1]
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(base)
     for key, value in (incoming or {}).items():
@@ -1732,25 +2927,33 @@ def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any
     return result
 
 
-def _custom_profile_for_storage(raw: dict[str, Any]) -> dict[str, Any]:
+def _custom_profile_for_storage(
+    raw: dict[str, Any],
+    *,
+    profile_id: str = "evolution-api2-custom",
+    profile_name: str = "Evolution Legacy API2",
+    notes: str = "Deprecated legacy API2 settings; Evolution now uses agent_api.",
+    default_temperature: float = 0.2,
+    default_max_tokens: int = 1400,
+) -> dict[str, Any]:
     protocol = str(raw.get("protocol") or "openai").strip()
-    if protocol not in API2_PROTOCOLS:
+    if protocol not in LLM_MODEL_PROTOCOLS:
         protocol = "openai"
     return {
-        "id": str(raw.get("id") or "evolution-api2-custom").strip() or "evolution-api2-custom",
-        "name": str(raw.get("name") or "Evolution API2").strip() or "Evolution API2",
+        "id": str(raw.get("id") or profile_id).strip() or profile_id,
+        "name": str(raw.get("name") or profile_name).strip() or profile_name,
         "preset_key": str(raw.get("preset_key") or "custom-openai-compatible").strip() or "custom-openai-compatible",
         "protocol": protocol,
         "base_url": str(raw.get("base_url") or "").strip(),
         "api_key": str(raw.get("api_key") or "").strip(),
         "model": str(raw.get("model") or "").strip(),
-        "temperature": _clamp_float(raw.get("temperature"), 0.0, 2.0, 0.2),
-        "max_tokens": _clamp_int(raw.get("max_tokens"), 256, 4096, 1400),
+        "temperature": _clamp_float(raw.get("temperature"), 0.0, 2.0, default_temperature),
+        "max_tokens": _clamp_int(raw.get("max_tokens"), 128, 4096, default_max_tokens),
         "timeout_seconds": _clamp_int(raw.get("timeout_seconds"), 10, 900, 180),
         "extra_headers": raw.get("extra_headers") if isinstance(raw.get("extra_headers"), dict) else {},
         "extra_query": raw.get("extra_query") if isinstance(raw.get("extra_query"), dict) else {},
         "extra_body": raw.get("extra_body") if isinstance(raw.get("extra_body"), dict) else {},
-        "notes": str(raw.get("notes") or "Evolution 控制卡压缩专用 API"),
+        "notes": str(raw.get("notes") or notes),
         "use_legacy_chat_completions": bool(raw.get("use_legacy_chat_completions")),
     }
 
@@ -1759,10 +2962,10 @@ def _custom_profile_for_llm(raw: dict[str, Any]) -> dict[str, Any]:
     return _custom_profile_for_storage(raw)
 
 
-def _build_api2_control_card_prompt(*, chapter_number: Optional[int], outline: str, raw_context: str) -> Any:
+def _build_agent_control_card_prompt(*, chapter_number: Optional[int], outline: str, raw_context: str) -> Any:
     system = (
-        "你是 Evolution 插件的状态压缩器，不写正文。"
-        "你只把冗长世界状态压缩成给正文作者使用的本章写作控制卡。"
+        "你是 Evolution 智能体的上下文调度器，不写正文。"
+        "你负责把世界线、路线图、角色卡、审查经验和本地语义记忆压缩成给正文作者使用的本章写作控制卡。"
     )
     user = f"""【本章】
 第{chapter_number or '-'}章
@@ -1773,14 +2976,17 @@ def _build_api2_control_card_prompt(*, chapter_number: Optional[int], outline: s
 【原始 Evolution 上下文】
 {raw_context}
 
-请输出中文控制卡，建议 900-1300 字符，必须包含：
-1. 上一章结尾必须承接的状态。
-2. 本章硬约束与禁写事项。
-3. 角色信息边界：谁知道什么，谁不能提前知道什么。
-4. 本章剧情推进目标。
-5. 禁用重复模板：不要使用“没有说话/没有回答/没有立刻回答/沉默了几秒/盯着屏幕看了几秒/呼吸停了一拍”等。
-6. 替代表现方式：具体动作、环境反应、技术操作、心理判断、场面调度。
-7. 文风适配提醒：根据原始上下文和本章题材调整措辞，不固定成某一种文风。
+请输出中文智能体控制卡，建议 900-1300 字符，必须包含：
+1. 上一章结尾必须承接的状态，特别是人物已经所在的位置、携带物、伤势、情绪、未完成动作。
+2. 本章硬约束与禁写事项：不要重复抵达已经抵达的地点，不要重置已经发生的状态。
+3. 角色信息边界：谁知道什么，谁不能提前知道什么，谁只能根据现场线索推断。
+4. 路线与空间提醒：人物移动必须有起点、过程、终点；相遇必须满足时间和地点交汇。
+5. 人物卡与性格调色盘提醒：性格表现要从底色、主色调、点缀和衍生行为自然显现，不要只贴标签。
+6. 本章剧情推进目标：只列可执行动作和必须完成的戏剧任务。
+7. 篇幅控制：默认目标约 2500 字；若用户或原始上下文给出其他章节字数，以用户目标为准；超过 3000 字必须收束当前场景。
+8. 禁用重复模板：不要使用“没有说话/没有回答/没有立刻回答/声音很轻/深吸一口气/沉默了几秒/盯着屏幕看了几秒/呼吸停了一拍/像是”等。
+9. 替代表现方式：具体动作、环境反应、技术操作、心理判断、场面调度。
+10. 文风适配提醒：根据原始上下文和本章题材调整措辞，不固定成某一种文风。
 
 只输出控制卡，不要写正文、标题、解释或评分。"""
     try:
@@ -1811,7 +3017,7 @@ def _make_generation_config(*, model: str, max_tokens: int, temperature: float) 
         return GenerationConfigFallback(model=model, max_tokens=max_tokens, temperature=temperature)
 
 
-def _clean_api2_control_card(content: str) -> str:
+def _clean_control_card(content: str) -> str:
     text = str(content or "").strip()
     text = text.removeprefix("```markdown").removeprefix("```text").removeprefix("```").strip()
     text = text.removesuffix("```").strip()
@@ -1845,7 +3051,7 @@ def _run_async_blocking(awaitable):
         except BaseException as exc:  # pragma: no cover - defensive bridge
             box["error"] = exc
 
-    thread = threading.Thread(target=runner, name="evolution-api2-control-card", daemon=True)
+    thread = threading.Thread(target=runner, name="evolution-agent-control-card", daemon=True)
     thread.start()
     thread.join()
     if "error" in box:

@@ -6,18 +6,19 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 
 from .service import EvolutionWorldAssistantService
+from .structured_extractor import LLMStructuredExtractorProvider
 
 router = APIRouter(prefix="/api/v1/plugins/evolution-world", tags=["plugins:evolution-world"])
-_service = EvolutionWorldAssistantService()
+_service = EvolutionWorldAssistantService(extractor_provider=LLMStructuredExtractorProvider())
 
 
 @router.get("/status")
 async def get_status():
     return {
         "plugin_name": "world_evolution_core",
-        "version": "0.1.1",
+        "version": "0.1.2",
         "status": "installed",
-        "phase": "structured-extraction-phase-2",
+        "phase": "agentic-evolution-phase-1",
         "capabilities": [
             "after_commit",
             "before_context_build",
@@ -34,8 +35,23 @@ async def get_status():
             "continuity_constraints",
             "prehistory_worldline",
             "story_planning_context",
-            "api2_control_card",
-            "api2_custom_provider",
+            "story_graph",
+            "global_route_map",
+            "route_conflict_detection",
+            "compact_vector_capsules",
+            "agentic_evolution",
+            "gep_assets",
+            "agent_capsules",
+            "agent_api",
+            "agent_api_custom_provider",
+            "host_context_reader",
+            "host_context_injection",
+            "host_context_review_evidence",
+            "plotpilot_native_context_adapter",
+            "multi_collection_semantic_recall",
+            "semantic_keyword_fallback",
+            "diagnostics",
+            "risk_review",
         ],
     }
 
@@ -52,17 +68,27 @@ async def update_settings(payload: dict):
 
 @router.post("/settings/models")
 async def fetch_api2_models(payload: dict):
+    return _service.deprecated_api2_response()
+
+
+@router.post("/settings/test")
+async def test_api2_connection(payload: dict):
+    return _service.deprecated_api2_response()
+
+
+@router.post("/settings/agent/models")
+async def fetch_agent_models(payload: dict):
     try:
-        return await _service.fetch_api2_models(payload or {})
+        return await _service.fetch_agent_models(payload or {})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.post("/settings/test")
-async def test_api2_connection(payload: dict):
-    return await _service.test_api2_connection(payload or {})
+@router.post("/settings/agent/test")
+async def test_agent_connection(payload: dict):
+    return await _service.test_agent_connection(payload or {})
 
 
 @router.get("/novels/{novel_id}/characters")
@@ -121,6 +147,21 @@ async def list_continuity_constraints(novel_id: str, limit: int = 80):
     return _service.list_continuity_constraints(novel_id, limit=limit)
 
 
+@router.get("/novels/{novel_id}/story-graph/chapters")
+async def list_story_graph_chapters(novel_id: str, limit: int = 50):
+    return _service.list_story_graph_chapters(novel_id, limit=limit)
+
+
+@router.get("/novels/{novel_id}/routes/global")
+async def get_global_route_map(novel_id: str):
+    return _service.get_global_route_map(novel_id)
+
+
+@router.get("/novels/{novel_id}/routes/conflicts")
+async def list_route_conflicts(novel_id: str, limit: int = 80):
+    return _service.list_route_conflicts(novel_id, limit=limit)
+
+
 @router.get("/novels/{novel_id}/prehistory/worldline")
 async def get_prehistory_worldline(novel_id: str):
     worldline = _service.repository.get_prehistory_worldline(novel_id)
@@ -132,6 +173,16 @@ async def get_prehistory_worldline(novel_id: str):
 @router.get("/novels/{novel_id}/timeline/review-records")
 async def list_review_records(novel_id: str, limit: int = 30):
     return _service.list_review_records(novel_id, limit=limit)
+
+
+@router.get("/novels/{novel_id}/agent/status")
+async def get_agent_status(novel_id: str):
+    return _service.get_agent_status(novel_id)
+
+
+@router.get("/novels/{novel_id}/diagnostics")
+async def get_diagnostics(novel_id: str):
+    return _service.get_diagnostics(novel_id)
 
 
 @router.post("/novels/{novel_id}/chapters/{chapter_number}/review")

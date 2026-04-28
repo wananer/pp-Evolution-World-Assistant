@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from .agent_assets import render_agent_selection
 from .context_capsules import enrich_blocks_with_capsules
+from .host_context import render_host_context_sections
 
 PLUGIN_NAME = "world_evolution_core"
 
@@ -18,6 +20,11 @@ def build_context_patch(
     chapter_summaries: Optional[list[dict[str, Any]]] = None,
     volume_summaries: Optional[list[dict[str, Any]]] = None,
     previous_injections: Optional[list[dict[str, Any]]] = None,
+    route_map: Optional[dict[str, Any]] = None,
+    semantic_memory: Optional[dict[str, Any]] = None,
+    host_context: Optional[dict[str, Any]] = None,
+    agent_selection: Optional[dict[str, Any]] = None,
+    style_repetition_state: Optional[dict[str, Any]] = None,
     max_characters: int = 8,
     max_facts: int = 5,
 ) -> dict[str, Any]:
@@ -106,6 +113,75 @@ def build_context_patch(
             }
         )
 
+    host_blocks = render_host_context_sections(host_context or {})
+    if host_blocks:
+        blocks.extend(host_blocks)
+
+    agent_board = render_agent_selection(agent_selection)
+    if agent_board:
+        blocks.append(
+            {
+                "id": "evolution_agent_strategy",
+                "title": "Evolution 智能体策略",
+                "kind": "agent_strategy",
+                "priority": 64,
+                "token_budget": 420,
+                "content": agent_board,
+                "items": {
+                    "signals": (agent_selection or {}).get("signals") or [],
+                    "selected_gene_ids": (agent_selection or {}).get("selected_gene_ids") or [],
+                    "selected_capsule_ids": (agent_selection or {}).get("selected_capsule_ids") or [],
+                    "rationale": (agent_selection or {}).get("rationale") or "",
+                },
+            }
+        )
+
+    semantic_board = _render_semantic_memory_board(semantic_memory)
+    if semantic_board:
+        blocks.append(
+            {
+                "id": "local_semantic_memory",
+                "title": "本地语义记忆召回",
+                "kind": "local_semantic_memory",
+                "priority": 60,
+                "token_budget": 420,
+                "content": semantic_board,
+                "items": (semantic_memory or {}).get("items") or [],
+            }
+        )
+
+    route_board = _render_route_board(route_map)
+    if route_board:
+        blocks.append(
+            {
+                "id": "story_graph_routes",
+                "title": "人物路线与世界线图",
+                "kind": "story_graph_route_constraints",
+                "priority": 58,
+                "token_budget": 360,
+                "content": route_board,
+                "items": {
+                    "aggregate": (route_map or {}).get("aggregate") or {},
+                    "conflicts": ((route_map or {}).get("conflicts") or [])[-6:],
+                    "meetings": ((route_map or {}).get("meetings") or [])[-8:],
+                },
+            }
+        )
+
+    repetition_board = _render_style_repetition_board(style_repetition_state)
+    if repetition_board:
+        blocks.append(
+            {
+                "id": "style_repetition_guard",
+                "title": "重复表达前置控制",
+                "kind": "style_repetition_guard",
+                "priority": 57,
+                "token_budget": 220,
+                "content": repetition_board,
+                "items": (style_repetition_state or {}).get("phrases") or [],
+            }
+        )
+
     risks = _build_risks(focus_characters, recent_facts, offstage_characters)
     if risks:
         blocks.append(
@@ -135,6 +211,9 @@ def build_context_patch(
         "merge_strategy": "append_by_priority",
         "blocks": blocks,
         "skipped_blocks": skipped_blocks,
+        "agent_selection": agent_selection or {},
+        "host_context_summary": _host_context_summary(host_context),
+        "plotpilot_context_usage": dict((host_context or {}).get("plotpilot_context_usage") or {}),
         "estimated_token_budget": sum(int(block.get("token_budget") or 0) for block in blocks),
     }
 
@@ -148,6 +227,19 @@ def render_patch_summary(patch: dict[str, Any]) -> str:
         lines.append(f"【{block.get('title') or block.get('id')}】")
         lines.append(content)
     return "\n".join(lines)
+
+
+def _host_context_summary(context: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        return {}
+    return {
+        "source": context.get("source"),
+        "active_sources": list(context.get("active_sources") or []),
+        "degraded_sources": list(context.get("degraded_sources") or []),
+        "counts": dict(context.get("counts") or {}),
+        "before_chapter": context.get("before_chapter"),
+        "plotpilot_context_usage": dict(context.get("plotpilot_context_usage") or {}),
+    }
 
 
 def _select_characters(
@@ -217,7 +309,94 @@ def _render_usage_protocol() -> str:
         "以下内容是角色连续性参考，不是本章任务清单；不要逐条复述，也不要为使用这些信息强行安排情节。"
         "章节承接状态是硬约束：下一章开头必须承接上一章结尾；若跳时空，需要先交代过渡。"
         "硬边界用于避免逻辑越界；软倾向只影响选择风格；可变状态可在本章新证据刺激下自然更新。"
+        "默认按用户目标控制篇幅，本轮压力测试以约2500字/章为目标；超过3000字应主动收束场景。"
+        "避免复用高频模板句，如没有说话、没有回答、声音很轻、深吸一口气、沉默了几秒、像是等。"
     )
+
+
+def _render_route_board(route_map: Optional[dict[str, Any]]) -> str:
+    if not isinstance(route_map, dict):
+        return ""
+    aggregate = route_map.get("aggregate") if isinstance(route_map.get("aggregate"), dict) else {}
+    edges = [item for item in route_map.get("edges") or [] if isinstance(item, dict)]
+    conflicts = [item for item in route_map.get("conflicts") or [] if isinstance(item, dict)]
+    meetings = [item for item in route_map.get("meetings") or [] if isinstance(item, dict)]
+    if not edges and not conflicts:
+        return ""
+    lines = [
+        f"已记录路线边 {aggregate.get('route_edge_count', len(edges))} 条、地点 {aggregate.get('location_count', 0)} 个、交汇 {aggregate.get('meeting_count', len(meetings))} 处。",
+        "写下一章时必须先确认上一章人物终点；若改变地点，先写移动、跳时或视角桥接。",
+    ]
+    if edges:
+        lines.append("【最近路线】")
+        for edge in edges[-8:]:
+            lines.append(
+                f"- 第{edge.get('chapter_start')}章｜{edge.get('character')}："
+                f"{edge.get('from_location') or '未知'} -> {edge.get('to_location') or '未知'}"
+            )
+    if meetings:
+        lines.append("【路线交汇】")
+        for meeting in meetings[-5:]:
+            lines.append(f"- 第{meeting.get('chapter_number')}章｜{meeting.get('location')}：{'、'.join(_as_strings(meeting.get('characters')))}")
+    if conflicts:
+        lines.append("【需要审查的路线风险】")
+        for conflict in conflicts[-6:]:
+            lines.append(f"- {conflict.get('severity')}｜第{conflict.get('chapter_current')}章｜{conflict.get('message')}｜处理：{_route_conflict_guidance(conflict)}")
+    return "\n".join(lines)
+
+
+def _route_conflict_guidance(conflict: dict[str, Any]) -> str:
+    conflict_type = str(conflict.get("type") or "")
+    if conflict_type == "repeated_arrival":
+        return "承接在场状态；若重新进入，先写离开和再次抵达。"
+    if conflict_type == "location_jump_without_bridge":
+        return "补一句路线、时间消耗、跳时提示或视角桥接。"
+    if conflict_type == "boundary_rollback":
+        return "核对上一章终点，不要无解释回到旧状态。"
+    return "补足移动链或状态解释。"
+
+
+def _render_semantic_memory_board(memory: Optional[dict[str, Any]]) -> str:
+    if not isinstance(memory, dict):
+        return ""
+    items = [item for item in memory.get("items") or [] if isinstance(item, dict)]
+    if not items:
+        return ""
+    source = str(memory.get("source") or "local")
+    lines = [
+        f"来源：{source}。以下为本地知识库/向量库按本章大纲召回的相关事实，只作为连续性证据，不要求逐条复述。"
+    ]
+    for item in items[:8]:
+        chapter = item.get("chapter_number")
+        chapter_label = f"第{chapter}章｜" if chapter else ""
+        score = item.get("score")
+        score_label = f"｜score={float(score):.2f}" if isinstance(score, (int, float)) else ""
+        text = _clean_display_text(str(item.get("text") or ""))
+        if text:
+            lines.append(f"- {chapter_label}{text}{score_label}")
+    return "\n".join(lines)
+
+
+def _render_style_repetition_board(state: Optional[dict[str, Any]]) -> str:
+    if not isinstance(state, dict):
+        return ""
+    phrases = [item for item in state.get("phrases") or [] if isinstance(item, dict)]
+    if not phrases:
+        return ""
+    lines = ["近3章/本章检测到高频反应模板；下一章优先改用动作、视线、空间调度、物件互动，不要继续机械复用。"]
+    for item in phrases[:6]:
+        phrase = _clean_display_text(item.get("phrase") or "")
+        count = item.get("count")
+        guidance = _clean_display_text(item.get("replacement_guidance") or "")
+        if phrase:
+            lines.append(f"- 「{phrase}」出现{count}次：{guidance or '换成具体行为或场景推进。'}")
+    return "\n".join(lines)
+
+
+def _as_strings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
 
 
 def _render_focus_characters(characters: list[dict[str, Any]]) -> str:
@@ -349,6 +528,7 @@ def _render_palette_brief(value: Any) -> str:
             parts.append("行为衍生=" + " / ".join(descriptions))
     return "；".join(parts)
 
+
 def _render_background_constraints(characters: list[dict[str, Any]]) -> str:
     lines = []
     for card in characters:
@@ -439,6 +619,10 @@ def _build_risks(characters: list[dict[str, Any]], facts: list[dict[str, Any]], 
         if stale:
             names = "、".join(str(card.get("name")) for card in stale[:4])
             risks.append(f"这些角色较久未更新，重新登场前建议交代状态：{names}")
+        missing_palette = [card for card in characters if _palette_missing(card.get("personality_palette"))]
+        if missing_palette:
+            names = "、".join(str(card.get("name")) for card in missing_palette[:4])
+            risks.append(f"以下重点角色性格调色盘不完整：{names}。不要只写性格标签，先用动作、选择和关系反应推断底色/主色调。")
     if background_characters:
         names = "、".join(str(card.get("name")) for card in background_characters[:4])
         risks.append(f"以下近期角色未被本章大纲明确召回，保持离场/远端状态；除非剧情需要，不要强行安排出场：{names}")
@@ -447,3 +631,9 @@ def _build_risks(characters: list[dict[str, Any]], facts: list[dict[str, Any]], 
         if not latest.get("locations"):
             risks.append("最近章节缺少明确地点，下一章生成前建议确认场景位置。")
     return risks[:4]
+
+
+def _palette_missing(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return True
+    return not str(value.get("base") or "").strip() or not value.get("main_tones") or not value.get("derivatives")

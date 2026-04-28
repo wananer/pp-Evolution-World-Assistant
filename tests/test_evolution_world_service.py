@@ -218,24 +218,24 @@ async def test_after_commit_extracts_unquoted_chinese_character_names(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_api2_control_card_setting_compresses_context_inside_evolution(tmp_path):
+async def test_agent_api_control_card_setting_compresses_context_inside_evolution(tmp_path):
     storage = PluginStorage(root=tmp_path)
     fake_llm = FakeControlCardLLM()
     service = EvolutionWorldAssistantService(
         storage=storage,
         jobs=PluginJobRegistry(storage),
-        api2_llm_service=fake_llm,
+        agent_llm_service=fake_llm,
     )
     saved = service.update_settings(
         {
-            "api2_control_card": {
+            "agent_api": {
                 "enabled": True,
                 "provider_mode": "custom",
                 "custom_profile": {
                     "protocol": "openai",
                     "base_url": "https://api.example.test/v1",
                     "api_key": "secret",
-                    "model": "api2-model",
+                    "model": "agent-model",
                     "temperature": 0.1,
                     "max_tokens": 900,
                 },
@@ -243,157 +243,51 @@ async def test_api2_control_card_setting_compresses_context_inside_evolution(tmp
         }
     )
 
-    assert saved["api2_control_card"]["enabled"] is True
-    assert saved["api2_control_card"]["custom_profile"]["api_key"] == ""
-    assert saved["api2_control_card"]["custom_profile"]["api_key_configured"] is True
+    assert saved["agent_api"]["enabled"] is True
+    assert saved["agent_api"]["custom_profile"]["api_key"] == ""
+    assert saved["agent_api"]["custom_profile"]["api_key_configured"] is True
 
     await service.after_commit(
         {
-            "novel_id": "novel-api2",
+            "novel_id": "novel-agent",
             "chapter_number": 1,
             "payload": {"content": "沈砚进入C307，拿起黑匣子。结尾时沈砚仍在C307内部观察墙面划痕。"},
         }
     )
     context = service.before_context_build(
         {
-            "novel_id": "novel-api2",
+            "novel_id": "novel-agent",
             "chapter_number": 2,
             "payload": {"outline": "沈砚继续调查C307内部的划痕。"},
         }
     )
 
     block = context["context_blocks"][0]
-    assert block["title"] == "Evolution 写作控制卡"
+    assert block["title"] == "Evolution 智能体写作控制卡"
     assert "沈砚已经在C307内部" in block["content"]
     assert "不要重复进入C307" in block["content"]
-    assert block["metadata"]["api2_control_card_enabled"] is True
-    assert block["metadata"]["api2_provider_mode"] == "custom"
+    assert block["metadata"]["agent_control_card_enabled"] is True
+    assert block["metadata"]["agent_provider_mode"] == "custom"
     assert fake_llm.calls
     assert "只输出控制卡" in fake_llm.calls[0]["prompt"].user
-    records = service.repository.list_context_control_card_records("novel-api2")
+    records = service.repository.list_context_control_card_records("novel-agent")
     assert records[-1]["provider_mode"] == "custom"
+    assert records[-1]["source"] == "agent_api"
     assert records[-1]["token_usage"]["total_tokens"] == 168
 
 
 @pytest.mark.asyncio
-async def test_api2_model_fetch_uses_saved_custom_key_without_exposing_it(tmp_path, monkeypatch):
+async def test_legacy_api2_routes_are_deprecated(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
-    service.update_settings(
-        {
-            "api2_control_card": {
-                "provider_mode": "custom",
-                "custom_profile": {
-                    "protocol": "openai",
-                    "base_url": "https://api.example.test/v1",
-                    "api_key": "stored-secret",
-                },
-            }
-        }
-    )
-    calls = []
 
-    async def fake_fetch_model_items(request):
-        calls.append(request)
-        return [
-            {"id": "model-a", "name": "model-a", "owned_by": "gateway"},
-            {"id": "model-b", "name": "model-b", "owned_by": "gateway"},
-        ]
+    models = await service.fetch_api2_models({})
+    connection = await service.test_api2_connection({})
 
-    monkeypatch.setattr(evolution_service_module, "_fetch_api2_model_items", fake_fetch_model_items)
-
-    result = await service.fetch_api2_models(
-        {
-            "provider_mode": "custom",
-            "custom_profile": {
-                "protocol": "openai",
-                "base_url": "https://api.example.test/v1",
-                "api_key": "",
-            },
-        }
-    )
-
-    assert result["ok"] is True
-    assert result["count"] == 2
-    assert [item["id"] for item in result["items"]] == ["model-a", "model-b"]
-    assert calls[0]["api_key"] == "stored-secret"
-    assert "stored-secret" not in str(result)
-
-
-@pytest.mark.asyncio
-async def test_api2_model_fetch_uses_current_form_values(tmp_path, monkeypatch):
-    storage = PluginStorage(root=tmp_path)
-    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
-    service.update_settings(
-        {
-            "api2_control_card": {
-                "provider_mode": "custom",
-                "custom_profile": {
-                    "protocol": "openai",
-                    "base_url": "https://api.old.example/v1",
-                    "api_key": "stored-secret",
-                },
-            }
-        }
-    )
-    calls = []
-
-    async def fake_fetch_model_items(request):
-        calls.append(request)
-        return [{"id": "deepseek-chat", "name": "deepseek-chat", "owned_by": "deepseek"}]
-
-    monkeypatch.setattr(evolution_service_module, "_fetch_api2_model_items", fake_fetch_model_items)
-
-    result = await service.fetch_api2_models(
-        {
-            "api2_control_card": {
-                "provider_mode": "custom",
-                "custom_profile": {
-                    "protocol": "openai",
-                    "base_url": "https://api.deepseek.com/v1",
-                    "api_key": "typed-secret",
-                    "model": "deepseek-chat",
-                },
-            },
-            "timeout_ms": 60000,
-        }
-    )
-
-    assert result["ok"] is True
-    assert calls[0]["api_key"] == "typed-secret"
-    assert calls[0]["base_url"] == "https://api.deepseek.com/v1"
-    assert calls[0]["timeout_ms"] == 60000
-    assert "stored-secret" not in str(result)
-    assert "typed-secret" not in str(result)
-
-
-@pytest.mark.asyncio
-async def test_api2_connection_test_uses_current_form_values(tmp_path):
-    storage = PluginStorage(root=tmp_path)
-    service = EvolutionWorldAssistantService(
-        storage=storage,
-        jobs=PluginJobRegistry(storage),
-        api2_llm_service=FakeConnectionLLM(),
-    )
-
-    result = await service.test_api2_connection(
-        {
-            "api2_control_card": {
-                "provider_mode": "custom",
-                "custom_profile": {
-                    "protocol": "openai",
-                    "base_url": "https://api.example.test/v1",
-                    "api_key": "typed-secret",
-                    "model": "deepseek-test-model",
-                },
-            }
-        }
-    )
-
-    assert result["ok"] is True
-    assert result["model"] == "deepseek-test-model"
-    assert result["preview"] == "OK"
-    assert "typed-secret" not in str(result)
+    assert models["ok"] is False
+    assert models["deprecated"] is True
+    assert models["replacement"] == "agent_api"
+    assert connection["deprecated"] is True
 
 
 def test_api2_settings_preserves_custom_key_when_update_leaves_key_blank(tmp_path):

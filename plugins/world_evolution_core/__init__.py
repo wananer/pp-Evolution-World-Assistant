@@ -7,8 +7,9 @@ def init_api(app) -> None:
 
     from .routes import router
     from .service import EvolutionWorldAssistantService
+    from .structured_extractor import LLMStructuredExtractorProvider
 
-    service = EvolutionWorldAssistantService()
+    service = EvolutionWorldAssistantService(extractor_provider=LLMStructuredExtractorProvider())
     register_hook("world_evolution_core", "after_novel_created", service.after_novel_created)
     register_hook("world_evolution_core", "before_story_planning", service.before_story_planning)
     register_hook("world_evolution_core", "after_commit", service.after_commit)

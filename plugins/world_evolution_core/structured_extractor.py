@@ -1,8 +1,15 @@
 """Structured extraction contract and fallback pipeline for Evolution World."""
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from domain.ai.services.llm_service import LLMService
+else:
+    LLMService = Any
 
 from .extractor import extract_chapter_facts
 from .models import ChapterFactSnapshot
@@ -76,6 +83,32 @@ class StructuredExtractionResult:
 class StructuredExtractorProvider(Protocol):
     async def extract(self, request: dict[str, Any]) -> dict[str, Any]:
         """Return a JSON-like response matching ``STRUCTURED_EXTRACTION_SCHEMA``."""
+
+
+class LLMStructuredExtractorProvider:
+    """LLM-backed provider for rich Evolution character/world extraction."""
+
+    def __init__(self, llm_service: LLMService | None = None, *, max_tokens: int = 2200) -> None:
+        self.llm_service = llm_service
+        self.max_tokens = max_tokens
+
+    async def extract(self, request: dict[str, Any]) -> dict[str, Any]:
+        from domain.ai.services.llm_service import GenerationConfig
+
+        llm = self.llm_service or _create_active_llm_service()
+        prompt = _build_structured_extraction_prompt(request)
+        result = await llm.generate(
+            prompt,
+            GenerationConfig(
+                max_tokens=self.max_tokens,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            ),
+        )
+        data, errors = _parse_llm_json(result.content)
+        if data is None:
+            raise ValueError("structured extraction JSON parse failed: " + "; ".join(errors[:4]))
+        return data
 
 
 STRUCTURED_EXTRACTION_SCHEMA: dict[str, Any] = {
@@ -199,6 +232,75 @@ STRUCTURED_EXTRACTION_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+def _create_active_llm_service() -> LLMService:
+    from infrastructure.ai.provider_factory import LLMProviderFactory
+
+    return LLMProviderFactory().create_active_provider()
+
+
+def _build_structured_extraction_prompt(request: dict[str, Any]) -> Any:
+    from domain.ai.value_objects.prompt import Prompt
+
+    schema = request.get("schema") or STRUCTURED_EXTRACTION_SCHEMA
+    chapter_number = request.get("chapter_number")
+    content = str(request.get("content") or "")
+    system = (
+        "你是 PlotPilot Evolution 的结构化事实抽取器。"
+        "你只输出 JSON 对象，不写解释、不写 Markdown。"
+        "必须从正文中抽取明确事实，禁止把书名、地点、物件、形容词短语、章节名误当人物。"
+    )
+    user = f"""请阅读第 {chapter_number} 章正文，输出符合 schema 的 JSON。
+
+硬规则：
+1. characters 只包含正文中明确出场或被明确提及的人物。
+2. 每个人物必须尽量补全 appearance、attributes、world_profile、personality_palette。
+3. 性格调色盘不是标签列表，而是行为模型：
+   - base 是底色，表示深层驱动力。
+   - main_tones 是主色调，表示高频可见行为倾向。
+   - accents 是点缀，表示在特定关系/压力下显露的次级特质。
+   - derivatives 写具体衍生行为：触发条件、可见表现、限制、反面代价。
+4. 如果正文证据不足，可以给出“暂未定型/待观察”的保守调色盘，但不能留空。
+5. known_facts/unknowns/misbeliefs 必须符合角色视角，不允许让角色知道未在场信息。
+6. world_events 只记录本章发生的事实，不要总结未来。
+
+JSON schema:
+{json.dumps(schema, ensure_ascii=False)}
+
+正文：
+{content[:12000]}
+"""
+    return Prompt(system=system, user=user)
+
+
+def _parse_llm_json(raw: str) -> tuple[dict[str, Any] | None, list[str]]:
+    cleaned = _sanitize_llm_json(raw)
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data, []
+        return None, [f"root is {type(data).__name__}, expected object"]
+    except json.JSONDecodeError as exc:
+        errors = [str(exc)]
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end > start:
+        try:
+            data = json.loads(cleaned[start : end + 1])
+            if isinstance(data, dict):
+                return data, []
+        except json.JSONDecodeError as exc:
+            errors.append(str(exc))
+    return None, errors
+
+
+def _sanitize_llm_json(raw: str) -> str:
+    text = str(raw or "").strip().lstrip("\ufeff")
+    fence = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+    return re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text).strip()
 
 
 async def extract_structured_chapter_facts(
