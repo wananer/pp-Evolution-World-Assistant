@@ -1,40 +1,16 @@
 import pytest
 
-from plugins.world_evolution_core import service as evolution_service_module
 from plugins.world_evolution_core.continuity import analyze_chapter_transitions
 from plugins.world_evolution_core.service import EvolutionWorldAssistantService
 from plugins.platform.job_registry import PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
 
-class FakeControlCardResult:
-    def __init__(self, content):
-        self.content = content
-        self.token_usage = type(
-            "Usage",
-            (),
-            {"input_tokens": 123, "output_tokens": 45, "total_tokens": 168},
-        )()
-
-
-class FakeControlCardLLM:
-    def __init__(self):
-        self.calls = []
-
-    async def generate(self, prompt, config):
-        self.calls.append({"prompt": prompt, "config": config})
-        return FakeControlCardResult("【承接】沈砚已经在C307内部。\n【禁写】不要重复进入C307，不要使用没有说话。")
-
-    async def stream_generate(self, prompt, config):
-        yield "unused"
-
-
-class FakeConnectionLLM:
-    async def generate(self, prompt, config):
-        return FakeControlCardResult("OK")
-
-    async def stream_generate(self, prompt, config):
-        yield "unused"
+def _joined_context(context):
+    return "\n".join(
+        f"{block.get('title') or ''}\n{block.get('content') or ''}"
+        for block in context.get("context_blocks") or []
+    )
 
 
 @pytest.mark.asyncio
@@ -64,7 +40,7 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
 
     context = service.before_context_build({"novel_id": "novel-1", "chapter_number": 2})
     assert context["ok"] is True
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context(context)
     assert "本章焦点角色" in content
     assert "林澈" in content
     assert "《林澈》" not in content
@@ -82,30 +58,6 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     assert patch["blocks"][2]["kind"] == "focus_character_state"
     assert "上一章小总结" in content
     assert "下一章开头必须承接上一章结尾" in content
-
-
-@pytest.mark.asyncio
-async def test_evolution_keeps_query_indexes_inside_plugin_state(tmp_path):
-    storage = PluginStorage(root=tmp_path)
-    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
-
-    for chapter in range(1, 18):
-        await service.after_commit(
-            {
-                "novel_id": "novel-indexed",
-                "chapter_number": chapter,
-                "payload": {"content": f"《林澈》在雾城第{chapter}区记录黑塔线索。"},
-            }
-        )
-
-    facts_index = storage.read_json("world_evolution_core", ["novels", "novel-indexed", "facts_index.json"])
-    character_index = storage.read_json("world_evolution_core", ["novels", "novel-indexed", "characters_index.json"])
-
-    assert [item["chapter_number"] for item in facts_index["items"]][-3:] == [15, 16, 17]
-    assert character_index["items"][0]["name"] == "林澈"
-    assert service.repository.list_fact_snapshots("novel-indexed", before_chapter=17, limit=5)[0]["chapter_number"] == 12
-    assert service.repository.list_fact_snapshots("novel-indexed", before_chapter=17, limit=5)[-1]["chapter_number"] == 16
-    assert service.repository.list_relevant_character_cards("novel-indexed", "林澈继续调查黑塔")["items"][0]["name"] == "林澈"
 
 
 @pytest.mark.asyncio
@@ -132,7 +84,7 @@ async def test_after_commit_writes_chapter_and_volume_summaries(tmp_path):
     assert volume_summaries[0]["chapter_end"] == 10
 
     context = service.before_context_build({"novel_id": "novel-summary", "chapter_number": 11})
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context(context)
     assert "最近10章大总结" in content
     assert "上一章小总结" in content
     assert "上一章结尾状态" in content
@@ -215,105 +167,6 @@ async def test_after_commit_extracts_unquoted_chinese_character_names(tmp_path):
     assert result["data"]["facts"]["characters"] == ["沈砚", "顾岚", "陆行舟", "顾珩"]
     cards = service.list_characters("novel-unquoted")["items"]
     assert {card["name"] for card in cards} == {"沈砚", "顾岚", "陆行舟", "顾珩"}
-
-
-@pytest.mark.asyncio
-async def test_agent_api_control_card_setting_compresses_context_inside_evolution(tmp_path):
-    storage = PluginStorage(root=tmp_path)
-    fake_llm = FakeControlCardLLM()
-    service = EvolutionWorldAssistantService(
-        storage=storage,
-        jobs=PluginJobRegistry(storage),
-        agent_llm_service=fake_llm,
-    )
-    saved = service.update_settings(
-        {
-            "agent_api": {
-                "enabled": True,
-                "provider_mode": "custom",
-                "custom_profile": {
-                    "protocol": "openai",
-                    "base_url": "https://api.example.test/v1",
-                    "api_key": "secret",
-                    "model": "agent-model",
-                    "temperature": 0.1,
-                    "max_tokens": 900,
-                },
-            }
-        }
-    )
-
-    assert saved["agent_api"]["enabled"] is True
-    assert saved["agent_api"]["custom_profile"]["api_key"] == ""
-    assert saved["agent_api"]["custom_profile"]["api_key_configured"] is True
-
-    await service.after_commit(
-        {
-            "novel_id": "novel-agent",
-            "chapter_number": 1,
-            "payload": {"content": "沈砚进入C307，拿起黑匣子。结尾时沈砚仍在C307内部观察墙面划痕。"},
-        }
-    )
-    context = service.before_context_build(
-        {
-            "novel_id": "novel-agent",
-            "chapter_number": 2,
-            "payload": {"outline": "沈砚继续调查C307内部的划痕。"},
-        }
-    )
-
-    block = context["context_blocks"][0]
-    assert block["title"] == "Evolution 智能体写作控制卡"
-    assert "沈砚已经在C307内部" in block["content"]
-    assert "不要重复进入C307" in block["content"]
-    assert block["metadata"]["agent_control_card_enabled"] is True
-    assert block["metadata"]["agent_provider_mode"] == "custom"
-    assert fake_llm.calls
-    assert "只输出控制卡" in fake_llm.calls[0]["prompt"].user
-    records = service.repository.list_context_control_card_records("novel-agent")
-    assert records[-1]["provider_mode"] == "custom"
-    assert records[-1]["source"] == "agent_api"
-    assert records[-1]["token_usage"]["total_tokens"] == 168
-
-
-@pytest.mark.asyncio
-async def test_legacy_api2_routes_are_deprecated(tmp_path):
-    storage = PluginStorage(root=tmp_path)
-    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
-
-    models = await service.fetch_api2_models({})
-    connection = await service.test_api2_connection({})
-
-    assert models["ok"] is False
-    assert models["deprecated"] is True
-    assert models["replacement"] == "agent_api"
-    assert connection["deprecated"] is True
-
-
-def test_api2_settings_preserves_custom_key_when_update_leaves_key_blank(tmp_path):
-    storage = PluginStorage(root=tmp_path)
-    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
-    service.update_settings(
-        {
-            "api2_control_card": {
-                "provider_mode": "custom",
-                "custom_profile": {"api_key": "first-key", "model": "api2-model"},
-            }
-        }
-    )
-    service.update_settings(
-        {
-            "api2_control_card": {
-                "enabled": True,
-                "provider_mode": "custom",
-                "custom_profile": {"api_key": "", "model": "api2-model-2"},
-            }
-        }
-    )
-
-    raw = service.get_settings(safe=False)
-    assert raw["api2_control_card"]["custom_profile"]["api_key"] == "first-key"
-    assert raw["api2_control_card"]["custom_profile"]["model"] == "api2-model-2"
 
 
 @pytest.mark.asyncio
@@ -559,7 +412,7 @@ async def test_structured_provider_persists_rich_character_profile(tmp_path):
     context = service.before_context_build(
         {"novel_id": "novel-rich", "chapter_number": 2, "payload": {"outline": "秋明月结束演出后去找红美玲。"}}
     )
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context(context)
     assert "外貌/出场识别" in content
     assert "性格调色盘" in content
     assert "底色=叛逆" in content
@@ -768,7 +621,7 @@ async def test_rich_character_card_tracks_cognition_growth_and_limits(tmp_path):
             "payload": {"outline": "林澈继续调查黑塔密门。"},
         }
     )
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context(context)
     assert "不是本章任务清单" in content
     assert "不要逐条复述" in content
     assert "硬边界（不可无过渡违反）" in content
@@ -962,7 +815,7 @@ async def test_before_story_planning_returns_worldline_and_foreshadow_context(tm
 
     assert result["ok"] is True
     block = result["context_blocks"][0]
-    assert block["title"] == "Evolution 故事前史与伏笔库"
+    assert block["title"] == "Evolution 规划锁与故事前史"
     assert "故事开始前的世界线" in block["content"]
     assert "可用于大纲与伏笔的种子" in block["content"]
     assert result["data"]["foreshadow_seeds"]

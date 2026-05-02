@@ -7,7 +7,19 @@ from typing import Any, Optional, Union, Tuple
 from plugins.platform.plugin_storage import PluginStorage
 
 from .agent_assets import default_genes, summarize_agent_status
+from .agent_status_summary import (
+    active_gene_versions,
+    agent_api_usage_from_control_cards,
+    agent_orchestration_summary,
+    auto_evolution_summary,
+    context_injection_tier_summary,
+    knowledge_base_summary,
+    native_context_alignment,
+    normalize_host_context_summary,
+    normalize_planning_alignment,
+)
 from .models import ChapterFactSnapshot, CharacterCard
+from .personality_palette import merge_palette_missing_fields, personality_palette_status
 
 PLUGIN_NAME = "world_evolution_core"
 RECENT_CONTEXT_FACT_LIMIT = 12
@@ -168,6 +180,44 @@ class EvolutionWorldRepository:
                 current["recent_events"] = current["recent_events"][-8:]
             self.write_character_card(novel_id, current)
             updated.append(current)
+        return updated
+
+    def record_invalid_character_candidates(self, novel_id: str, names: list[str], *, chapter_number: int) -> None:
+        for name in _dedupe_strings(names):
+            if not name or _is_valid_character_entity(name):
+                continue
+            self.write_character_card(
+                novel_id,
+                {
+                    "character_id": _slug(name),
+                    "name": name,
+                    "first_seen_chapter": chapter_number,
+                    "last_seen_chapter": chapter_number,
+                    "status": "invalid_entity",
+                    "entity_type": "non_person",
+                    "invalid_reason": "filtered_non_character_entity",
+                },
+            )
+
+    def merge_character_updates(self, novel_id: str, character_updates: list[dict[str, Any]], *, chapter_number: Optional[int] = None) -> list[dict[str, Any]]:
+        updated: list[dict[str, Any]] = []
+        for update in character_updates:
+            if not isinstance(update, dict):
+                continue
+            name = str(update.get("name") or "").strip()
+            if not name:
+                continue
+            current = self.get_character_card(novel_id, name)
+            if not current or _is_invalid_character_entry(current):
+                continue
+            current = _ensure_character_defaults(current)
+            _merge_canonical_identity(current, update)
+            _merge_character_life_state(
+                current,
+                update,
+                chapter_number or _int_or_none(current.get("last_seen_chapter")) or 0,
+            )
+            updated.append(self.write_character_card(novel_id, current))
         return updated
 
     def rebuild_character_cards_from_facts(self, novel_id: str) -> list[dict[str, Any]]:
@@ -349,6 +399,16 @@ class EvolutionWorldRepository:
         items = sorted(items, key=lambda item: (int(item.get("chapter_number") or 0), int(item.get("scene_order") or 0), str(item.get("event_id") or "")))
         return items[-limit:] if limit > 0 else items
 
+    def delete_timeline_events_for_chapter(self, novel_id: str, chapter_number: int) -> int:
+        removed = 0
+        for event in self.list_timeline_events(novel_id, limit=0):
+            if int(event.get("chapter_number") or 0) != chapter_number:
+                continue
+            event_id = str(event.get("event_id") or _slug(str(event.get("summary") or "")))
+            if self._delete_scope(["novels", novel_id, "timeline", "events", f"chapter_{chapter_number}", f"{event_id}.json"]):
+                removed += 1
+        return removed
+
     def save_continuity_constraints(self, novel_id: str, constraints: list[dict[str, Any]]) -> None:
         for constraint in constraints:
             constraint_id = str(constraint.get("constraint_id") or _slug(str(constraint.get("rule") or "")))
@@ -364,6 +424,17 @@ class EvolutionWorldRepository:
         items = [data for data in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "timeline", "constraints"]) if isinstance(data, dict)]
         items = sorted(items, key=lambda item: (str(item.get("subject") or ""), str(item.get("type") or ""), str(item.get("constraint_id") or "")))
         return items[-limit:] if limit > 0 else items
+
+    def delete_continuity_constraints_for_chapter(self, novel_id: str, chapter_number: int) -> int:
+        removed = 0
+        for constraint in self.list_continuity_constraints(novel_id, limit=0):
+            constraint_chapter = int(constraint.get("chapter_number") or constraint.get("created_or_updated_chapter") or 0)
+            if constraint_chapter != chapter_number:
+                continue
+            constraint_id = str(constraint.get("constraint_id") or _slug(str(constraint.get("rule") or "")))
+            if self._delete_scope(["novels", novel_id, "timeline", "constraints", f"{constraint_id}.json"]):
+                removed += 1
+        return removed
 
     def save_story_graph_chapter(self, novel_id: str, chapter_number: int, graph: dict[str, Any]) -> None:
         self.storage.write_json(
@@ -437,6 +508,44 @@ class EvolutionWorldRepository:
     def list_review_records(self, novel_id: str, limit: int = 30) -> list[dict[str, Any]]:
         return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "timeline", "review_records.jsonl"], limit=limit)
 
+    def upsert_review_candidate(self, novel_id: str, candidate: dict[str, Any]) -> dict[str, Any]:
+        candidate_id = str(candidate.get("id") or "")
+        if not candidate_id:
+            raise ValueError("review candidate id is required")
+        prepared = dict(candidate)
+        prepared["novel_id"] = novel_id
+        self.storage.write_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "review_candidates", f"{candidate_id}.json"],
+            prepared,
+        )
+        return prepared
+
+    def get_review_candidate(self, novel_id: str, candidate_id: str) -> dict[str, Any] | None:
+        data = self.storage.read_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "review_candidates", f"{candidate_id}.json"],
+            default=None,
+        )
+        return data if isinstance(data, dict) else None
+
+    def list_review_candidates(
+        self,
+        novel_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        items = [
+            item
+            for item in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "review_candidates"])
+            if isinstance(item, dict)
+        ]
+        if status:
+            items = [item for item in items if str(item.get("status") or "") == status]
+        items.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
+        return items[-limit:] if limit > 0 else items
+
     def append_context_injection_record(self, novel_id: str, record: dict[str, Any]) -> None:
         self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "context", "injection_records.jsonl"], record)
 
@@ -448,6 +557,61 @@ class EvolutionWorldRepository:
 
     def list_context_control_card_records(self, novel_id: str, limit: int = 30) -> list[dict[str, Any]]:
         return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "context", "control_cards.jsonl"], limit=limit)
+
+    def upsert_agent_knowledge_document(self, novel_id: str, document: dict[str, Any]) -> None:
+        doc_id = str(document.get("id") or "")
+        if not doc_id:
+            return
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "knowledge", "documents", f"{doc_id}.json"], document)
+
+    def list_agent_knowledge_documents(self, novel_id: str, limit: int = 5000) -> list[dict[str, Any]]:
+        items = [
+            item
+            for item in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "agent", "knowledge", "documents"])
+            if isinstance(item, dict)
+        ]
+        items.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")))
+        return items[-limit:] if limit > 0 else items
+
+    def upsert_agent_knowledge_chunk(self, novel_id: str, chunk: dict[str, Any]) -> None:
+        chunk_id = str(chunk.get("chunk_id") or "")
+        if not chunk_id:
+            return
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "knowledge", "chunks", f"{chunk_id}.json"], chunk)
+
+    def list_agent_knowledge_chunks(self, novel_id: str, limit: int = 10000) -> list[dict[str, Any]]:
+        items = [
+            item
+            for item in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "agent", "knowledge", "chunks"])
+            if isinstance(item, dict)
+        ]
+        items.sort(key=lambda item: (int(item.get("chapter_number") or 0), str(item.get("source_type") or ""), str(item.get("chunk_id") or "")))
+        return items[-limit:] if limit > 0 else items
+
+    def clear_agent_knowledge(self, novel_id: str) -> dict[str, int]:
+        documents = 0
+        chunks = 0
+        for document in self.list_agent_knowledge_documents(novel_id, limit=0):
+            doc_id = str(document.get("id") or "")
+            if doc_id and self._delete_scope(["novels", novel_id, "agent", "knowledge", "documents", f"{doc_id}.json"]):
+                documents += 1
+        for chunk in self.list_agent_knowledge_chunks(novel_id, limit=0):
+            chunk_id = str(chunk.get("chunk_id") or "")
+            if chunk_id and self._delete_scope(["novels", novel_id, "agent", "knowledge", "chunks", f"{chunk_id}.json"]):
+                chunks += 1
+        return {"documents": documents, "chunks": chunks}
+
+    def append_agent_decision_record(self, novel_id: str, record: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "decisions.jsonl"], record)
+
+    def list_agent_decision_records(self, novel_id: str, limit: int = 80) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "decisions.jsonl"], limit=limit)
+
+    def append_gene_version(self, novel_id: str, version: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "gene_versions.jsonl"], version)
+
+    def list_gene_versions(self, novel_id: str, limit: int = 80) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "gene_versions.jsonl"], limit=limit)
 
     def get_settings(self) -> dict[str, Any]:
         data = self.storage.read_json(PLUGIN_NAME, ["settings.json"], default={})
@@ -597,7 +761,7 @@ class EvolutionWorldRepository:
 
     def get_host_context_summary(self, novel_id: str) -> dict[str, Any]:
         data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "host_context_summary.json"], default={})
-        return data if isinstance(data, dict) else {}
+        return normalize_host_context_summary(data if isinstance(data, dict) else {})
 
     def save_semantic_recall_summary(self, novel_id: str, summary: dict[str, Any]) -> None:
         self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "semantic_recall_summary.json"], summary)
@@ -605,6 +769,13 @@ class EvolutionWorldRepository:
     def get_semantic_recall_summary(self, novel_id: str) -> dict[str, Any]:
         data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "semantic_recall_summary.json"], default={})
         return data if isinstance(data, dict) else {}
+
+    def save_planning_alignment(self, novel_id: str, alignment: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "planning_alignment.json"], alignment)
+
+    def get_planning_alignment(self, novel_id: str) -> dict[str, Any]:
+        data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "planning_alignment.json"], default={})
+        return normalize_planning_alignment(data if isinstance(data, dict) else {})
 
     def append_agent_event(self, novel_id: str, event: dict[str, Any]) -> None:
         self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "events.jsonl"], event)
@@ -619,6 +790,7 @@ class EvolutionWorldRepository:
         return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "selection_records.jsonl"], limit=limit)
 
     def get_agent_status(self, novel_id: str) -> dict[str, Any]:
+        host_context_summary = self.get_host_context_summary(novel_id)
         return summarize_agent_status(
             genes=self.list_agent_genes(novel_id),
             capsules=self.list_agent_capsules(novel_id),
@@ -627,8 +799,17 @@ class EvolutionWorldRepository:
             reflections=self.list_agent_reflections(novel_id),
             candidates=self.list_agent_gene_candidates(novel_id),
             memory_index=self.get_agent_memory_index(novel_id),
-            host_context_summary=self.get_host_context_summary(novel_id),
+            host_context_summary=host_context_summary,
             semantic_recall_summary=self.get_semantic_recall_summary(novel_id),
+            agent_api_usage=agent_api_usage_from_control_cards(self.list_context_control_card_records(novel_id, limit=500)),
+            planning_alignment=self.get_planning_alignment(novel_id),
+            native_context_alignment=native_context_alignment(host_context_summary),
+            context_injection_summary=context_injection_tier_summary(self.list_context_injection_records(novel_id, limit=1)),
+            agent_orchestration=agent_orchestration_summary(self.list_agent_decision_records(novel_id, limit=200)),
+            knowledge_base=knowledge_base_summary(self.list_agent_knowledge_documents(novel_id), self.list_agent_knowledge_chunks(novel_id)),
+            auto_evolution=auto_evolution_summary(self.list_gene_versions(novel_id, limit=200)),
+            active_gene_versions=active_gene_versions(self.list_agent_genes(novel_id)),
+            personality_palette_status=personality_palette_status(self.list_all_character_cards(novel_id).get("items", [])),
         )
 
     def save_diagnostics_snapshot(self, novel_id: str, snapshot: dict[str, Any]) -> None:
@@ -775,7 +956,6 @@ _NON_CHARACTER_NAMES = {
     "访客卡",
     "臂章",
     "钥匙",
-    "黑匣子",
     "章节标题",
     "标题",
     "线索",
@@ -783,7 +963,7 @@ _NON_CHARACTER_NAMES = {
     "秘密",
     "记忆",
     "沉默",
-    "黑塔主线",
+    "主线",
 }
 
 _NON_CHARACTER_TOKENS = (
@@ -793,6 +973,8 @@ _NON_CHARACTER_TOKENS = (
     "编号",
     "防火门",
     "金属",
+    "箱",
+    "匣",
     "书籍",
     "钥匙",
     "教程",
@@ -803,9 +985,10 @@ _NON_CHARACTER_TOKENS = (
     "秘密",
     "记忆",
     "警报",
+    "下方",
 )
 
-_NON_CHARACTER_SUFFIXES = ("之谜", "真相", "记录", "线索", "计划", "任务", "报告")
+_NON_CHARACTER_SUFFIXES = ("之谜", "真相", "记录", "线索", "计划", "任务", "报告", "下方", "区域")
 
 
 def _is_valid_character_entity(name: str) -> bool:
@@ -915,6 +1098,12 @@ def _default_personality_palette() -> dict[str, Any]:
         "main_tones": [],
         "accents": [],
         "derivatives": [],
+        "pressure_triggers": [],
+        "relationship_tones": [],
+        "voice_signature": [],
+        "gesture_signature": [],
+        "negative_costs": [],
+        "presence_mode": "active_scene",
     }
 
 
@@ -944,17 +1133,7 @@ def _merge_world_profile(card: dict[str, Any], incoming: Any) -> None:
 
 def _merge_personality_palette(card: dict[str, Any], incoming: Any) -> None:
     current = card.setdefault("personality_palette", _default_personality_palette())
-    if not isinstance(incoming, dict):
-        return
-    metaphor = str(incoming.get("metaphor") or "").strip()
-    if metaphor:
-        current["metaphor"] = metaphor[:240]
-    base = str(incoming.get("base") or "").strip()
-    if base:
-        current["base"] = base[:40]
-    current["main_tones"] = _merge_limited_strings(current.get("main_tones") or [], incoming.get("main_tones") or [], limit=8)
-    current["accents"] = _merge_limited_strings(current.get("accents") or [], incoming.get("accents") or [], limit=10)
-    current["derivatives"] = _merge_derivatives(current.get("derivatives") or [], incoming.get("derivatives") or [], limit=32)
+    card["personality_palette"] = merge_palette_missing_fields(current, incoming)
 
 
 def _merge_records(existing: list[Any], incoming: list[Any], *, limit: int) -> list[dict[str, str]]:

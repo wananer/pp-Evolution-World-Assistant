@@ -8,7 +8,9 @@ def init_api(app) -> None:
     from .routes import router
     from .service import EvolutionWorldAssistantService
     from .structured_extractor import LLMStructuredExtractorProvider
+    from .prompt_registry import seed_evolution_prompts
 
+    seed_evolution_prompts()
     service = EvolutionWorldAssistantService(extractor_provider=LLMStructuredExtractorProvider())
     register_hook("world_evolution_core", "after_novel_created", service.after_novel_created)
     register_hook("world_evolution_core", "before_story_planning", service.before_story_planning)

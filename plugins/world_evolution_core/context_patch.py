@@ -1,13 +1,46 @@
 """Budget-friendly context patch builder for Evolution World."""
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from .agent_assets import render_agent_selection
 from .context_capsules import enrich_blocks_with_capsules
 from .host_context import render_host_context_sections
 
+try:
+    from infrastructure.ai.prompt_resolver import resolve_prompt
+except Exception:
+    def resolve_prompt(_node_key: str, _variables: dict[str, Any], *, fallback_system: str = "", fallback_user: str = "") -> Any:
+        class PromptResolutionFallback:
+            system = fallback_system
+            user = fallback_user
+
+            def to_prompt(self) -> Any:
+                return self
+
+        return PromptResolutionFallback()
+
 PLUGIN_NAME = "world_evolution_core"
+TIER_T0 = "intended_t0"
+TIER_T1 = "intended_t1"
+
+T0_CONTEXT_KINDS = {
+    "chapter_state_bridge",
+    "focus_character_state",
+    "background_character_constraint",
+    "chapter_facts",
+    "story_graph_route_constraints",
+    "continuity_risk",
+}
+
+T1_CONTEXT_KINDS = {
+    "usage_protocol",
+    "plotpilot_native_context_strategy",
+    "agent_strategy",
+    "local_semantic_memory",
+    "style_repetition_guard",
+}
 
 
 def build_context_patch(
@@ -196,6 +229,7 @@ def build_context_patch(
             }
         )
 
+    blocks = _apply_injection_tiers(blocks)
     blocks, skipped_blocks = enrich_blocks_with_capsules(
         blocks,
         novel_id=novel_id,
@@ -229,6 +263,36 @@ def render_patch_summary(patch: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def tier_summary(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize explicit Evolution injection tiers for diagnostics and audit."""
+    counts = {TIER_T0: 0, TIER_T1: 0, "unknown": 0}
+    chars = {TIER_T0: 0, TIER_T1: 0, "unknown": 0}
+    block_tiers: list[dict[str, Any]] = []
+    for block in blocks:
+        tier = _block_tier(block)
+        bucket = tier if tier in {TIER_T0, TIER_T1} else "unknown"
+        content_chars = len(str(block.get("content") or ""))
+        counts[bucket] += 1
+        chars[bucket] += content_chars
+        block_tiers.append(
+            {
+                "id": block.get("id"),
+                "kind": block.get("kind"),
+                "tier": tier or "unknown",
+                "chars": content_chars,
+            }
+        )
+    return {
+        "t0_block_count": counts[TIER_T0],
+        "t1_block_count": counts[TIER_T1],
+        "tier_unknown_count": counts["unknown"],
+        "t0_chars": chars[TIER_T0],
+        "t1_chars": chars[TIER_T1],
+        "tier_unknown_chars": chars["unknown"],
+        "block_tiers": block_tiers,
+    }
+
+
 def _host_context_summary(context: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not isinstance(context, dict):
         return {}
@@ -236,10 +300,46 @@ def _host_context_summary(context: Optional[dict[str, Any]]) -> dict[str, Any]:
         "source": context.get("source"),
         "active_sources": list(context.get("active_sources") or []),
         "degraded_sources": list(context.get("degraded_sources") or []),
+        "empty_sources": list(context.get("empty_sources") or []),
+        "field_missing_sources": list(context.get("field_missing_sources") or []),
+        "source_status": dict(context.get("source_status") or {}),
         "counts": dict(context.get("counts") or {}),
         "before_chapter": context.get("before_chapter"),
         "plotpilot_context_usage": dict(context.get("plotpilot_context_usage") or {}),
     }
+
+
+def _apply_injection_tiers(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_with_injection_tier(block, _infer_injection_tier(block)) for block in blocks]
+
+
+def _infer_injection_tier(block: dict[str, Any]) -> str:
+    kind = str(block.get("kind") or "")
+    block_id = str(block.get("id") or "")
+    if kind in T0_CONTEXT_KINDS or block_id in {"chapter_state_bridge", "focus_characters", "background_constraints", "recent_facts", "story_graph_routes", "continuity_risks"}:
+        return TIER_T0
+    if kind in T1_CONTEXT_KINDS or block_id in {"evolution_usage_protocol", "plotpilot_native_strategy", "evolution_agent_strategy", "local_semantic_memory", "style_repetition_guard"}:
+        return TIER_T1
+    return TIER_T1
+
+
+def _with_injection_tier(block: dict[str, Any], tier: str) -> dict[str, Any]:
+    enriched = dict(block)
+    metadata = dict(enriched.get("metadata") or {})
+    metadata["tier"] = tier
+    metadata["injection_layer"] = "t0_hard_constraints" if tier == TIER_T0 else "t1_soft_strategy"
+    metadata.setdefault("strategy_only", True)
+    enriched["tier"] = tier
+    enriched["metadata"] = metadata
+    return enriched
+
+
+def _block_tier(block: dict[str, Any]) -> str:
+    tier = str(block.get("tier") or "").strip()
+    if tier:
+        return tier
+    metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+    return str(metadata.get("tier") or "").strip()
 
 
 def _select_characters(
@@ -298,20 +398,52 @@ def _is_recent(card: dict[str, Any], latest_chapter: int) -> bool:
 
 def _extract_context_terms(text: str) -> list[str]:
     terms: list[str] = []
-    for marker in ["黑塔", "雾城", "星港", "城门", "钥匙", "罗盘", "白鸦", "旧案", "密门"]:
-        if marker in text:
-            terms.append(marker)
+    seen: set[str] = set()
+    for match in re.finditer(r"[\u4e00-\u9fffA-Za-z0-9·]{2,14}", text or ""):
+        value = match.group(0).strip("的一是在了和与及中")
+        if len(value) < 2 or value in seen or _looks_like_generic_context_word(value):
+            continue
+        seen.add(value)
+        terms.append(value)
+        if len(terms) >= 12:
+            break
     return terms
 
 
+def _looks_like_generic_context_word(value: str) -> bool:
+    return value in {
+        "这一章",
+        "上一章",
+        "下一章",
+        "角色",
+        "人物",
+        "场景",
+        "地点",
+        "发现",
+        "进入",
+        "离开",
+        "来到",
+        "看见",
+        "继续",
+        "开始",
+        "结束",
+    }
+
+
 def _render_usage_protocol() -> str:
-    return (
+    fallback = (
         "以下内容是角色连续性参考，不是本章任务清单；不要逐条复述，也不要为使用这些信息强行安排情节。"
         "章节承接状态是硬约束：下一章开头必须承接上一章结尾；若跳时空，需要先交代过渡。"
         "硬边界用于避免逻辑越界；软倾向只影响选择风格；可变状态可在本章新证据刺激下自然更新。"
         "默认按用户目标控制篇幅，本轮压力测试以约2500字/章为目标；超过3000字应主动收束场景。"
         "避免复用高频模板句，如没有说话、没有回答、声音很轻、深吸一口气、沉默了几秒、像是等。"
     )
+    return resolve_prompt(
+        "plugin.world_evolution_core.context-usage-protocol",
+        {},
+        fallback_system="你是 Evolution 上下文压缩器。",
+        fallback_user=fallback,
+    ).user
 
 
 def _render_route_board(route_map: Optional[dict[str, Any]]) -> str:
@@ -383,7 +515,7 @@ def _render_style_repetition_board(state: Optional[dict[str, Any]]) -> str:
     phrases = [item for item in state.get("phrases") or [] if isinstance(item, dict)]
     if not phrases:
         return ""
-    lines = ["近3章/本章检测到高频反应模板；下一章优先改用动作、视线、空间调度、物件互动，不要继续机械复用。"]
+    lines = ["重复表达规避：近3章/本章检测到高频反应模板；下一章优先改用动作、视线、空间调度、物件互动，不要继续机械复用。"]
     for item in phrases[:6]:
         phrase = _clean_display_text(item.get("phrase") or "")
         count = item.get("count")
@@ -511,22 +643,62 @@ def _render_palette_brief(value: Any) -> str:
     base = _clean_display_text(value.get("base") or "")
     if base:
         parts.append(f"底色={base}")
-    main = _join_limited(value.get("main_tones"), 3)
+    presence_mode = _clean_display_text(value.get("presence_mode") or "")
+    if presence_mode and presence_mode != "active_scene":
+        parts.append(f"在场模式={_presence_mode_label(presence_mode)}")
+    pressure = _join_limited(value.get("pressure_triggers"), 1)
+    if pressure:
+        parts.append(f"本章压力={pressure}")
+    relationship = _render_relationship_tone(value.get("relationship_tones"))
+    if relationship:
+        parts.append(f"关系反应={relationship}")
+    signature = _join_limited(value.get("voice_signature"), 1) or _join_limited(value.get("gesture_signature"), 1)
+    if signature:
+        parts.append(f"声线/动作锚点={signature}")
+    costs = _join_limited(value.get("negative_costs"), 1)
+    if costs:
+        parts.append(f"禁止突变点={costs}")
+    main = _join_limited(value.get("main_tones"), 2)
     if main:
         parts.append(f"主色调={main}")
-    accents = _join_limited(value.get("accents"), 2)
+    accents = _join_limited(value.get("accents"), 1)
     if accents:
         parts.append(f"点缀={accents}")
     derivatives = value.get("derivatives") if isinstance(value.get("derivatives"), list) else []
     if derivatives:
         descriptions = []
-        for item in derivatives[:2]:
+        for item in derivatives[:1]:
             if isinstance(item, dict) and item.get("description"):
                 prefix = _clean_display_text(item.get("tone") or item.get("title") or "衍生")
                 descriptions.append(f"{prefix}:{_clean_display_text(item.get('description'))}")
         if descriptions:
             parts.append("行为衍生=" + " / ".join(descriptions))
     return "；".join(parts)
+
+
+def _render_relationship_tone(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    parts = []
+    for item in value[:1]:
+        if isinstance(item, dict):
+            target = _clean_display_text(item.get("target") or "相关对象")
+            tone = _clean_display_text(item.get("tone") or "")
+            behavior = _clean_display_text(item.get("behavior") or "")
+            if tone or behavior:
+                parts.append(f"{target}:{tone or behavior}")
+        elif str(item or "").strip():
+            parts.append(_clean_display_text(item))
+    return "、".join(parts)
+
+
+def _presence_mode_label(value: str) -> str:
+    return {
+        "remote": "远端",
+        "memory_trace": "记忆痕迹",
+        "record_only": "记录/遗留信息",
+        "system_entity": "系统型实体",
+    }.get(value, value)
 
 
 def _render_background_constraints(characters: list[dict[str, Any]]) -> str:

@@ -110,6 +110,7 @@ def _enrich_block(block: dict[str, Any], *, novel_id: str, chapter_number: int |
         "novel_id": novel_id,
         "chapter_number": chapter_number,
         "kind": enriched.get("kind"),
+        "tier": _block_tier(enriched),
         "semantic_key": semantic_key,
         "content_hash": block_hash,
         "priority": int(enriched.get("priority") or 0),
@@ -175,13 +176,23 @@ def _audit_item(block: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": block.get("id"),
         "kind": block.get("kind"),
+        "tier": _block_tier(block),
         "title": block.get("title"),
         "semantic_key": block.get("semantic_key"),
         "content_hash": block.get("content_hash"),
         "capsule_id": block.get("capsule_id"),
         "priority": block.get("priority"),
         "token_budget": block.get("token_budget"),
+        "content_chars": len(str(block.get("content") or "")),
     }
+
+
+def _block_tier(block: dict[str, Any]) -> str:
+    tier = str(block.get("tier") or "").strip()
+    if tier:
+        return tier
+    metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+    return str(metadata.get("tier") or "").strip()
 
 
 def _slug(value: str) -> str:

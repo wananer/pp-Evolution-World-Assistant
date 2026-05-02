@@ -44,6 +44,13 @@
   "route_aliases": [
     "evolution-world"
   ],
+  "prompts": [
+    "plugin.world_evolution_core.agent-decision",
+    "plugin.world_evolution_core.agent-reflection",
+    "plugin.world_evolution_core.structured-extraction",
+    "plugin.world_evolution_core.connection-test",
+    "plugin.world_evolution_core.context-usage-protocol"
+  ],
   "permissions": [
     "read_novel",
     "read_chapter",

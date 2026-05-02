@@ -14,6 +14,8 @@ from typing import Any
 
 from plugins.platform.host_database import ReadOnlyHostDatabase
 
+from .personality_palette import derive_palette_from_native_character, merge_palette_missing_fields
+
 
 @dataclass
 class CanonicalCharacter:
@@ -21,6 +23,7 @@ class CanonicalCharacter:
     name: str
     aliases: list[str] = field(default_factory=list)
     description: str = ""
+    personality_palette: dict[str, Any] = field(default_factory=dict)
     source: str = "host"
     confidence: float = 0.95
 
@@ -28,7 +31,7 @@ class CanonicalCharacter:
         return _dedupe([self.name, *self.aliases])
 
     def to_update(self) -> dict[str, Any]:
-        return {
+        data = {
             "name": self.name,
             "canonical_character_id": self.character_id,
             "canonical_source": self.source,
@@ -37,6 +40,9 @@ class CanonicalCharacter:
             "summary": self.description,
             "confidence": self.confidence,
         }
+        if self.personality_palette:
+            data["personality_palette"] = self.personality_palette
+        return data
 
 
 @dataclass
@@ -107,7 +113,16 @@ def calibrate_extracted_characters(
         match = canonical_by_term.get(raw_name)
         if match is None:
             continue
-        merged = {**update, **match.to_update(), "name": match.name}
+        canonical_update = match.to_update()
+        merged = {**canonical_update, **update, "name": match.name}
+        for key in ("canonical_character_id", "canonical_source", "profile_source", "aliases", "summary", "confidence"):
+            if canonical_update.get(key):
+                merged[key] = canonical_update[key]
+        if update.get("personality_palette") or canonical_update.get("personality_palette"):
+            merged["personality_palette"] = merge_palette_missing_fields(
+                update.get("personality_palette"),
+                canonical_update.get("personality_palette"),
+            )
         updates_by_name[match.name] = _merge_update(updates_by_name.get(match.name), merged)
 
     for character in mentioned:
@@ -156,7 +171,7 @@ def _load_bible_characters(host_database: ReadOnlyHostDatabase, novel_id: str) -
     rows = _safe_fetch_all(
         host_database,
         """
-        SELECT id, name, description, mental_state, verbal_tic, idle_behavior
+        SELECT *
         FROM bible_characters
         WHERE novel_id = ?
         ORDER BY id
@@ -174,11 +189,19 @@ def _load_bible_characters(host_database: ReadOnlyHostDatabase, novel_id: str) -
             _labeled("口癖", row.get("verbal_tic")),
             _labeled("待机行为", row.get("idle_behavior")),
         )
+        palette = derive_palette_from_native_character(
+            name=name,
+            description=row.get("description"),
+            mental_state=row.get("mental_state"),
+            verbal_tic=row.get("verbal_tic"),
+            idle_behavior=row.get("idle_behavior"),
+        )
         items.append(
             CanonicalCharacter(
                 character_id=str(row.get("id") or name),
                 name=name,
                 description=description,
+                personality_palette=palette,
                 source="bible",
                 confidence=0.99,
             )
@@ -273,6 +296,7 @@ def _merge_character(by_name: dict[str, CanonicalCharacter], incoming: Canonical
     existing.aliases = _dedupe([*existing.aliases, *incoming.aliases])
     if not existing.description and incoming.description:
         existing.description = incoming.description
+    existing.personality_palette = merge_palette_missing_fields(existing.personality_palette, incoming.personality_palette)
     if incoming.source == "bible" and existing.source != "bible":
         existing.character_id = incoming.character_id
         existing.source = incoming.source
@@ -286,6 +310,8 @@ def _merge_update(existing: dict[str, Any] | None, incoming: dict[str, Any]) -> 
     for key, value in incoming.items():
         if key == "aliases":
             merged[key] = _dedupe([*(merged.get(key) or []), *(value or [])])
+        elif key == "personality_palette":
+            merged[key] = merge_palette_missing_fields(merged.get(key), value)
         elif value and not merged.get(key):
             merged[key] = value
         elif key in {"canonical_character_id", "canonical_source", "profile_source"} and value:
