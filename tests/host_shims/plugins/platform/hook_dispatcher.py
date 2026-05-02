@@ -34,9 +34,26 @@ def list_hooks() -> dict[str, list[str]]:
     return {hook_name: [plugin_name for plugin_name, _ in handlers] for hook_name, handlers in _HOOKS.items()}
 
 
+def _plugin_is_enabled(plugin_name: str) -> bool:
+    try:
+        from plugins.loader import is_plugin_enabled
+
+        return is_plugin_enabled(plugin_name)
+    except Exception:
+        return True
+
+
+def has_enabled_hook(hook_name: str) -> bool:
+    """Return whether a hook has at least one currently enabled plugin handler."""
+    return any(_plugin_is_enabled(plugin_name) for plugin_name, _ in list(_HOOKS.get(hook_name, [])))
+
+
 async def dispatch_hook(hook_name: str, payload: Optional[PluginHookPayload] = None) -> list[PluginHookResult]:
     results: list[PluginHookResult] = []
     for plugin_name, handler in list(_HOOKS.get(hook_name, [])):
+        if not _plugin_is_enabled(plugin_name):
+            results.append({"plugin_name": plugin_name, "hook_name": hook_name, "ok": True, "skipped": True, "reason": "plugin disabled"})
+            continue
         hook_payload: PluginHookPayload = {**(payload or {}), "plugin_name": plugin_name}
         try:
             raw_result = handler(hook_payload)
@@ -66,6 +83,9 @@ def dispatch_hook_sync_best_effort(hook_name: str, payload: Optional[PluginHookP
     """
     results: list[PluginHookResult] = []
     for plugin_name, handler in list(_HOOKS.get(hook_name, [])):
+        if not _plugin_is_enabled(plugin_name):
+            results.append({"plugin_name": plugin_name, "hook_name": hook_name, "ok": True, "skipped": True, "reason": "plugin disabled"})
+            continue
         hook_payload: PluginHookPayload = {**(payload or {}), "plugin_name": plugin_name}
         try:
             raw_result = handler(hook_payload)

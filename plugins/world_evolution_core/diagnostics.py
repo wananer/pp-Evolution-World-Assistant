@@ -7,8 +7,12 @@ from typing import Any
 
 from plugins.platform.hook_dispatcher import list_hooks
 
+from .personality_palette import palette_missing_fields, personality_palette_status
+
 PLUGIN_NAME = "world_evolution_core"
 DIAGNOSTICS_SCHEMA_VERSION = 1
+TIER_T0 = "intended_t0"
+TIER_T1 = "intended_t1"
 EXPECTED_HOOKS = {
     "after_novel_created",
     "before_story_planning",
@@ -51,11 +55,24 @@ def build_diagnostics(
     _check_character_pollution(risks, repository, novel_id)
     _check_recent_failures(risks, agent_status)
     _check_settings_conflict(risks, repository)
+    context_budget_summary = _context_budget_summary(repository, novel_id)
+    review_candidate_summary = _review_candidate_summary(repository, novel_id)
+    injection_gate_summary = _injection_gate_summary(repository, novel_id)
+    plugin_leakage_check = _plugin_leakage_check(repository, novel_id, agent_status)
+    planning_alignment = agent_status.get("planning_alignment") if isinstance(agent_status.get("planning_alignment"), dict) else {}
+    native_context_alignment = agent_status.get("native_context_alignment") if isinstance(agent_status.get("native_context_alignment"), dict) else {}
+    agent_takeover_health = _agent_takeover_health(agent_status)
+    knowledge_coverage = agent_status.get("knowledge_base") if isinstance(agent_status.get("knowledge_base"), dict) else {}
+    knowledge_freshness = _knowledge_freshness(repository, novel_id, knowledge_coverage)
+    gene_mutation_audit = agent_status.get("auto_evolution") if isinstance(agent_status.get("auto_evolution"), dict) else {}
+    palette_status = agent_status.get("personality_palette_status") if isinstance(agent_status.get("personality_palette_status"), dict) else {}
+    degraded_agent_tools = _degraded_agent_tools(agent_status)
 
     risks.sort(key=lambda item: (_severity_rank(item.get("severity")), str(item.get("source") or "")))
     return {
         "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
         "novel_id": novel_id,
+        "architecture_mode": "agent_first_hybrid",
         "generated_at": _now(),
         "summary": _risk_summary(risks),
         "runtime": {
@@ -67,9 +84,24 @@ def build_diagnostics(
         },
         "host_context_summary": _redact(host_context_summary),
         "host_feature_alignment": _redact(host_feature_alignment),
+        "planning_alignment": _redact(planning_alignment),
+        "native_context_alignment": _redact(native_context_alignment),
+        "agent_takeover_health": _redact(agent_takeover_health),
+        "knowledge_coverage": _redact(knowledge_coverage),
+        "gene_mutation_audit": _redact(gene_mutation_audit),
+        "personality_palette_status": _redact(palette_status),
+        "degraded_agent_tools": _redact(degraded_agent_tools),
+        "degraded_sources": list(host_context_summary.get("degraded_sources") or []),
+        "empty_sources": list(host_context_summary.get("empty_sources") or []),
+        "field_missing_sources": list(host_context_summary.get("field_missing_sources") or []),
         "semantic_recall_summary": _redact(semantic_recall_summary),
         "dependency_status": dependency_status(),
         "agent_asset_counts": dict(agent_status.get("asset_counts") or {}),
+        "plugin_leakage_check": plugin_leakage_check,
+        "context_budget_summary": context_budget_summary,
+        "review_candidate_summary": review_candidate_summary,
+        "injection_gate_summary": injection_gate_summary,
+        "knowledge_freshness": knowledge_freshness,
         "risks": risks,
     }
 
@@ -97,6 +129,9 @@ def _check_host_context(risks: list[dict[str, Any]], summary: dict[str, Any]) ->
         return
     if empty:
         risks.append(_risk("info", "host_context", f"宿主表存在但暂无命中：{', '.join(empty[:8])}", "这表示 schema 可读但本小说尚未沉淀对应资料；不同于缺表降级。", "host_context_empty", {"empty_sources": empty, "counts": counts}))
+    field_missing = [str(item) for item in summary.get("field_missing_sources") or [] if str(item)]
+    if field_missing:
+        risks.append(_risk("info", "host_context", f"宿主表存在但字段不完整：{', '.join(field_missing[:8])}", "Evolution 会使用兼容字段或降级摘要；实验报告需标注 schema 版本差异。", "host_context_schema", {"field_missing_sources": field_missing, "source_status": source_status}))
     if not any(int(value or 0) for value in counts.values()):
         risks.append(_risk("info", "host_context", "外部信息源均未命中。", "如果本书已配置世界观/故事线/伏笔，需检查 novel_id 隔离或宿主读取映射。", "host_context", {"counts": counts}))
 
@@ -122,7 +157,181 @@ def _host_feature_alignment(summary: dict[str, Any]) -> dict[str, Any]:
         "long_context_duplicated": bool(usage.get("long_context_duplicated")),
         "degraded_sources": list(summary.get("degraded_sources") or []),
         "empty_sources": list(summary.get("empty_sources") or []),
+        "field_missing_sources": list(summary.get("field_missing_sources") or []),
         "source_status": dict(summary.get("source_status") or {}),
+    }
+
+
+def _context_budget_summary(repository: Any, novel_id: str) -> dict[str, Any]:
+    records = repository.list_context_injection_records(novel_id, limit=1)
+    latest = records[-1] if records else {}
+    blocks = _context_blocks_from_record(latest)
+    block_ids = [str(block.get("id") or block.get("title") or "") for block in blocks if block]
+    token_budget = sum(int(block.get("token_budget") or 0) for block in blocks)
+    tier_counts = {TIER_T0: 0, TIER_T1: 0, "unknown": 0}
+    tier_chars = {TIER_T0: 0, TIER_T1: 0, "unknown": 0}
+    block_tiers: list[dict[str, Any]] = []
+    for block in blocks:
+        tier = _block_tier(block)
+        bucket = tier if tier in {TIER_T0, TIER_T1} else "unknown"
+        chars = _block_chars(block)
+        tier_counts[bucket] += 1
+        tier_chars[bucket] += chars
+        block_tiers.append({"id": block.get("id"), "kind": block.get("kind"), "tier": tier or "unknown", "chars": chars})
+    return {
+        "has_context_injection": bool(records),
+        "block_count": len(blocks),
+        "token_budget": token_budget,
+        "t0_block_count": tier_counts[TIER_T0],
+        "t1_block_count": tier_counts[TIER_T1],
+        "tier_unknown_count": tier_counts["unknown"],
+        "t0_chars": tier_chars[TIER_T0],
+        "t1_chars": tier_chars[TIER_T1],
+        "tier_unknown_chars": tier_chars["unknown"],
+        "block_tiers": block_tiers,
+        "duplicate_block_ids": _duplicates(item for item in block_ids if item),
+        "strategy_only": any(block.get("id") == "plotpilot_native_strategy" for block in blocks),
+        "latest_chapter": latest.get("chapter_number") if isinstance(latest, dict) else None,
+        "legacy_record_normalized": bool(records) and not bool((latest or {}).get("blocks")) and bool(blocks),
+    }
+
+
+def _context_blocks_from_record(record: Any) -> list[dict[str, Any]]:
+    if not isinstance(record, dict):
+        return []
+    candidates = [
+        record.get("blocks"),
+        record.get("selected"),
+        record.get("context_blocks"),
+    ]
+    patch = record.get("context_patch") if isinstance(record.get("context_patch"), dict) else {}
+    candidates.append(patch.get("blocks"))
+    for value in candidates:
+        blocks = [block for block in (value or []) if isinstance(block, dict)]
+        if blocks:
+            return blocks
+    return []
+
+
+def _review_candidate_summary(repository: Any, novel_id: str) -> dict[str, Any]:
+    try:
+        candidates = repository.list_review_candidates(novel_id, limit=500)
+    except Exception:
+        candidates = []
+    by_status: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    by_risk: dict[str, int] = {}
+    for candidate in candidates:
+        by_status[str(candidate.get("status") or "unknown")] = by_status.get(str(candidate.get("status") or "unknown"), 0) + 1
+        by_type[str(candidate.get("candidate_type") or "unknown")] = by_type.get(str(candidate.get("candidate_type") or "unknown"), 0) + 1
+        by_risk[str(candidate.get("risk_level") or "unknown")] = by_risk.get(str(candidate.get("risk_level") or "unknown"), 0) + 1
+    return {
+        "total": len(candidates),
+        "pending": by_status.get("pending", 0),
+        "by_status": by_status,
+        "by_type": by_type,
+        "by_risk": by_risk,
+    }
+
+
+def _injection_gate_summary(repository: Any, novel_id: str) -> dict[str, Any]:
+    records = repository.list_context_injection_records(novel_id, limit=1)
+    latest = records[-1] if records else {}
+    decision = latest.get("gate_decision") if isinstance(latest, dict) and isinstance(latest.get("gate_decision"), dict) else {}
+    return {
+        "has_decision": bool(decision),
+        "should_inject": bool(decision.get("should_inject")),
+        "reasons": list(decision.get("reasons") or []),
+        "skipped_reasons": list(decision.get("skipped_reasons") or []),
+        "pending_review_count": int(decision.get("pending_review_count") or 0),
+        "t0_chars": int(decision.get("t0_chars") or 0),
+        "t1_chars": int(decision.get("t1_chars") or 0),
+        "skipped_block_count": int(decision.get("skipped_block_count") or latest.get("skipped_count") or 0),
+        "latest_chapter": latest.get("chapter_number") if isinstance(latest, dict) else None,
+    }
+
+
+def _knowledge_freshness(repository: Any, novel_id: str, coverage: dict[str, Any]) -> dict[str, Any]:
+    facts = repository.list_fact_snapshots(novel_id, limit=0)
+    latest_fact = max((_int_or_none(item.get("chapter_number")) or 0 for item in facts), default=0)
+    chunks = repository.list_agent_knowledge_chunks(novel_id, limit=0)
+    latest_chunk = max((_int_or_none(item.get("chapter_number")) or 0 for item in chunks), default=0)
+    return {
+        "latest_fact_chapter": latest_fact,
+        "latest_knowledge_chapter": latest_chunk,
+        "is_stale": bool(latest_fact and latest_chunk < latest_fact),
+        "document_count": int(coverage.get("document_count") or 0),
+        "chunk_count": int(coverage.get("chunk_count") or 0),
+    }
+
+
+def _agent_takeover_health(agent_status: dict[str, Any]) -> dict[str, Any]:
+    orchestration = agent_status.get("agent_orchestration") if isinstance(agent_status.get("agent_orchestration"), dict) else {}
+    knowledge = agent_status.get("knowledge_base") if isinstance(agent_status.get("knowledge_base"), dict) else {}
+    auto = agent_status.get("auto_evolution") if isinstance(agent_status.get("auto_evolution"), dict) else {}
+    decision_count = int(orchestration.get("decision_count") or 0)
+    degraded = int(orchestration.get("degraded_decision_count") or 0)
+    return {
+        "mode": "agent_first_hybrid",
+        "decision_boundary": orchestration.get("decision_boundary") or "agent_orchestrator",
+        "decision_count": decision_count,
+        "degraded_decision_count": degraded,
+        "healthy": bool(decision_count and int(knowledge.get("chunk_count") or 0) > 0),
+        "knowledge_chunk_count": int(knowledge.get("chunk_count") or 0),
+        "auto_evolution_mode": auto.get("mode") or "immediate",
+        "gene_version_count": int(auto.get("gene_version_count") or 0),
+    }
+
+
+def _degraded_agent_tools(agent_status: dict[str, Any]) -> list[dict[str, Any]]:
+    orchestration = agent_status.get("agent_orchestration") if isinstance(agent_status.get("agent_orchestration"), dict) else {}
+    degraded = int(orchestration.get("degraded_decision_count") or 0)
+    if not degraded:
+        return []
+    return [
+        {
+            "tool": "agent_orchestrator",
+            "degraded_decision_count": degraded,
+            "latest_phase": orchestration.get("latest_phase"),
+            "latest_status": orchestration.get("latest_status"),
+        }
+    ]
+
+
+def _block_tier(block: dict[str, Any]) -> str:
+    tier = str(block.get("tier") or "").strip()
+    if tier:
+        return tier
+    metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+    return str(metadata.get("tier") or metadata.get("intended_tier") or "").strip()
+
+
+def _block_chars(block: dict[str, Any]) -> int:
+    if block.get("content_chars") is not None:
+        try:
+            return int(block.get("content_chars") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return len(str(block.get("content") or ""))
+
+
+def _plugin_leakage_check(repository: Any, novel_id: str, agent_status: dict[str, Any]) -> dict[str, Any]:
+    asset_counts = agent_status.get("asset_counts") if isinstance(agent_status.get("asset_counts"), dict) else {}
+    injection_count = len(repository.list_context_injection_records(novel_id, limit=5))
+    review_count = len(repository.list_review_records(novel_id, limit=5))
+    learned_count = (
+        int(asset_counts.get("events") or 0)
+        + int(asset_counts.get("capsules") or 0)
+        + int(asset_counts.get("reflections") or 0)
+        + int(asset_counts.get("gene_candidates") or 0)
+    )
+    return {
+        "plugin_name": PLUGIN_NAME,
+        "enabled": _plugin_enabled(),
+        "context_injection_records": injection_count,
+        "review_records": review_count,
+        "agent_learning_assets": learned_count,
+        "has_evolution_activity": bool(injection_count or review_count or learned_count),
     }
 
 
@@ -209,6 +418,19 @@ def _check_character_pollution(risks: list[dict[str, Any]], repository: Any, nov
     if invalid:
         risks.append(_risk("warning", "character_cards", f"人物卡中有 {len(invalid)} 个污染实体已标记 invalid_entity。", "这些实体应只作为 world facts/props 参考，不进入角色卡主视图或上下文注入。", "character_cards", {"invalid_entities": [_invalid_character_evidence(card) for card in invalid[:8]], "invalid_count": len(invalid)}))
     active_cards = [card for card in cards if not _invalid_character_card(card)]
+    if active_cards:
+        status = personality_palette_status(active_cards)
+        if status.get("character_count"):
+            risks.append(
+                _risk(
+                    "info",
+                    "character_cards",
+                    f"性格调色盘覆盖率：{status.get('complete_count', 0)}/{status.get('character_count', 0)}。",
+                    "覆盖率低时，Evolution 会从原生 Bible 或章节行为中保守补全；完整后才注入具体调色盘短策略。",
+                    "personality_palette",
+                    status,
+                )
+            )
     missing_palette = [card for card in active_cards if _palette_missing(card)]
     if missing_palette:
         severity = "warning" if len(missing_palette) >= 3 else "info"
@@ -254,20 +476,17 @@ def _invalid_character_evidence(card: dict[str, Any]) -> dict[str, Any]:
 
 
 def _palette_missing(card: dict[str, Any]) -> bool:
-    palette = card.get("personality_palette") if isinstance(card.get("personality_palette"), dict) else {}
-    return not str(palette.get("base") or "").strip() or not palette.get("main_tones") or not palette.get("derivatives")
+    return bool(palette_missing_fields(card.get("personality_palette") if isinstance(card, dict) else {}))
 
 
 def _palette_evidence(card: dict[str, Any]) -> dict[str, Any]:
     palette = card.get("personality_palette") if isinstance(card.get("personality_palette"), dict) else {}
-    missing = []
-    if not str(palette.get("base") or "").strip():
-        missing.append("base")
-    if not palette.get("main_tones"):
-        missing.append("main_tones")
-    if not palette.get("derivatives"):
-        missing.append("derivatives")
-    return {"name": str(card.get("name") or ""), "last_seen_chapter": card.get("last_seen_chapter"), "missing_fields": missing}
+    return {
+        "name": str(card.get("name") or ""),
+        "last_seen_chapter": card.get("last_seen_chapter"),
+        "missing_fields": palette_missing_fields(palette),
+        "source": str(palette.get("source") or "unspecified"),
+    }
 
 
 def _check_recent_failures(risks: list[dict[str, Any]], status: dict[str, Any]) -> None:
@@ -354,6 +573,14 @@ def _redact(value: Any) -> Any:
 
 def _severity_rank(value: Any) -> int:
     return {"critical": 0, "warning": 1, "info": 2}.get(str(value), 3)
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _now() -> str:

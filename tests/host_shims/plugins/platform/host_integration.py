@@ -10,7 +10,7 @@ import logging
 from typing import Any
 
 from .context_bridge import dispatch_hook_sync, render_context_blocks
-from .hook_dispatcher import dispatch_hook
+from .hook_dispatcher import dispatch_hook, has_enabled_hook
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,8 @@ def build_generation_context_patch(
     max_chars: int = 6000,
 ) -> str:
     """Return plugin-provided context text for prompt assembly."""
+    if not has_enabled_hook("before_context_build"):
+        return ""
     try:
         results = dispatch_hook_sync(
             "before_context_build",
@@ -39,6 +41,46 @@ def build_generation_context_patch(
     except Exception as exc:
         logger.warning("Plugin context patch failed novel=%s ch=%s: %s", novel_id, chapter_number, exc)
         return ""
+
+
+def collect_generation_context_blocks(
+    novel_id: str,
+    chapter_number: int,
+    outline: str,
+    *,
+    source: str = "context_budget_allocator",
+) -> list[dict[str, Any]]:
+    """Return structured plugin context blocks for tier-aware prompt assembly."""
+    if not has_enabled_hook("before_context_build"):
+        return []
+    try:
+        results = dispatch_hook_sync(
+            "before_context_build",
+            {
+                "novel_id": novel_id,
+                "chapter_number": chapter_number,
+                "trigger_type": source,
+                "source": source,
+                "payload": {"outline": outline},
+            },
+        )
+    except Exception as exc:
+        logger.warning("Plugin context block collection failed novel=%s ch=%s: %s", novel_id, chapter_number, exc)
+        return []
+
+    blocks: list[dict[str, Any]] = []
+    for result in results:
+        if not result.get("ok", True) or result.get("skipped"):
+            continue
+        plugin_name = str(result.get("plugin_name") or "").strip()
+        for block in result.get("context_blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            content = str(block.get("content") or "").strip()
+            if not content:
+                continue
+            blocks.append({**block, "plugin_name": str(block.get("plugin_name") or plugin_name)})
+    return blocks
 
 
 async def notify_chapter_committed(

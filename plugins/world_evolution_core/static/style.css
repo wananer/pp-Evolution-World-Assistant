@@ -130,6 +130,7 @@
 .ewa-status-list dt { color: var(--ewa-muted); }
 .ewa-status-list dd { margin: 0; color: #fff; font-weight: 700; text-align: right; }
 .ewa-capabilities { margin-top: 14px; }
+.ewa-muted { margin: 10px 0 0; color: var(--ewa-muted); font-size: 12px; line-height: 1.5; }
 
 .ewa-loading,
 .ewa-empty { padding: 42px 18px; text-align: center; color: var(--ewa-muted); }
@@ -655,6 +656,13 @@
   flex-wrap: wrap;
   gap: 8px;
   margin: 10px 0;
+}
+
+.ewa-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .ewa-mini-action {
